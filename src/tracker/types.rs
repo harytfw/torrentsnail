@@ -1027,7 +1027,7 @@ mod test {
     #[test]
     fn test_error_response() -> Result<()> {
         let res0 = TrackerError {
-            action: Action::Scrape,
+            action: Action::Error,
             transaction_id: 1,
             message: "some error".to_string(),
         };
@@ -1042,6 +1042,6 @@ mod test {
     #[test]
     fn test_announce_to_query_string() {
         let q = AnnounceRequest::new();
-        println!("{}", q.to_query_string());
+        assert!(!q.to_query_string().is_empty());
     }
 }
