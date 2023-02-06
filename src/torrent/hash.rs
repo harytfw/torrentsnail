@@ -2,7 +2,7 @@ use super::{Error, Result};
 use serde::{de, ser};
 use std::{
     fmt::{Debug, Display},
-    ops,
+    ops, convert,
 };
 
 fn valid_byte(ch: u8) -> bool {
@@ -104,7 +104,7 @@ impl ops::DerefMut for HashId {
     }
 }
 
-impl std::convert::AsRef<[u8]> for HashId {
+impl convert::AsRef<[u8]> for HashId {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
