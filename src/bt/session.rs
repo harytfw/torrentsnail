@@ -562,7 +562,7 @@ impl TorrentSession {
                 let req = UTMetadataMessage::Request(piece.get_index());
                 peer.send_message((msg_id, req)).await?;
             }
-            peer.flush()?;
+            peer.flush().await?;
         }
         Ok(false)
     }
@@ -615,7 +615,7 @@ impl TorrentSession {
             for piece_info in req_piece_info {
                 peer.send_message(BTMessage::Request(piece_info)).await?;
             }
-            peer.flush()?;
+            peer.flush().await?;
         }
 
         Ok(state.broken)
