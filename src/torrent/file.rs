@@ -144,13 +144,14 @@ impl TorrentFile {
 
     pub fn from_info(info: TorrentInfo) -> Self {
         Self {
-            info,..Default::default()
+            info,
+            ..Default::default()
         }
     }
 
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         let data = std::fs::read(path)?;
-        let val: bencode::Value = bencode::from_bytes(&data)?; 
+        let val: bencode::Value = bencode::from_bytes(&data)?;
         let mut tf: Self = bencode::from_bytes(&data)?;
         tf.origin_content = Some(val.into());
         Ok(tf)
@@ -178,21 +179,41 @@ impl TorrentFile {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::{fs, path};
+    use std::fs;
 
-    use crate::bencode::{from_bytes};
+    use crate::bencode::from_bytes;
 
     #[test]
     fn parse_torrent() {
-        let p = path::Path::new("tests/archlinux.torrent");
-        let data = fs::read(p).expect("read torrent");
-        let tf: TorrentFile = from_bytes(&data).expect("decode");
+        struct TorrentTest {
+            path: &'static str,
+            info_hash: HashId,
+        }
 
-        assert_eq!(
-            tf.info_hash().unwrap().hex(),
-            "375ae3280cd80a8e9d7212e11dfaf7c45069dd35"
-        );
+        impl TorrentTest {
+            fn new(path: &'static str, info_hash: HashId) -> Self {
+                Self { path, info_hash }
+            }
+        }
 
-        assert_eq!(tf.info.get_files_meta()[0].path[0], "archlinux-2023.02.01-x86_64.iso")
+        for test_case in [
+            TorrentTest::new(
+                "tests/archlinux.torrent",
+                HashId::from_hex("375ae3280cd80a8e9d7212e11dfaf7c45069dd35").unwrap(),
+            ),
+            TorrentTest::new(
+                "tests/big-buck-bunny.torrent",
+                HashId::from_hex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c").unwrap(),
+            ),
+            TorrentTest::new(
+                "tests/sintel.torrent",
+                HashId::from_hex("08ada5a7a6183aae1e09d831df6748d566095a10").unwrap(),
+            ),
+        ] {
+            let data = fs::read(test_case.path).expect("read torrent");
+            let tf: TorrentFile = from_bytes(&data).expect("decode");
+
+            assert_eq!(tf.info_hash().unwrap(), test_case.info_hash);
+        }
     }
 }

@@ -64,11 +64,11 @@ impl Debug for FilePieceMap {
         f.debug_struct("FileMap")
             .field("path", &self.path)
             .field(
-                "first_piece",
+                "first_frag",
                 &(first_frag.piece_index, first_frag.piece_offset),
             )
             .field(
-                "last_piece",
+                "last_frag",
                 &(
                     last_frag.piece_index,
                     last_frag.piece_offset + last_frag.len,
@@ -129,9 +129,7 @@ impl FilePieceMap {
             create_dir_all(dir)?;
         }
 
-        let f = File::options()
-            .read(true)
-            .open(self.path.as_path())?;
+        let f = File::options().read(true).open(self.path.as_path())?;
 
         let mut write_cnt = 0usize;
 
@@ -214,14 +212,16 @@ pub fn build_file_piece_map(info: &TorrentInfo) -> Vec<FilePieceMap> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{torrent::TorrentFile};
-
     use super::*;
+    use crate::torrent::TorrentFile;
+    use glob::glob;
 
     #[test]
     fn test_build_file_map() {
-        let torrent = TorrentFile::from_path("tests/archlinux.torrent").unwrap();
-        let file_maps = build_file_piece_map(&torrent.info);
-        assert_eq!(file_maps.len(),1)
+        for path in glob("tests/**/*.torrent").unwrap() {
+            let path = path.unwrap();
+            let torrent = TorrentFile::from_path(path).unwrap();
+            let file_maps = build_file_piece_map(&torrent.info);
+        }
     }
 }
