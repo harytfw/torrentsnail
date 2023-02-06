@@ -191,12 +191,13 @@ pub enum BTMessage {
     Cancel(PieceInfo),
     Ping,
     Ext(BTExtMessage),
+    Unknown(u8),
 }
 
 impl Debug for BTMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut ds = f.debug_struct("BTMessage");
-        let tmp = ds.field("type", &self.msg_name());
+        let tmp = ds.field("type", &self.desc());
         let tmp = match self {
             Self::Have(n) => tmp.field("index", &n),
             Self::BitField(bits) => tmp.field("bits", &bits),
@@ -210,7 +211,7 @@ impl Debug for BTMessage {
 }
 
 impl BTMessage {
-    fn msg_id(&self) -> u8 {
+    fn id(&self) -> u8 {
         match self {
             Self::Choke => 0,
             Self::Unchoke => 1,
@@ -222,23 +223,25 @@ impl BTMessage {
             Self::Piece(_) => 7,
             Self::Cancel(_) => 8,
             Self::Ext(_) => 20,
+            Self::Unknown(id) => *id,
             Self::Ping => unreachable!(),
         }
     }
 
-    fn msg_name(&self) -> &'static str {
+    fn desc(&self) -> String {
         match self {
-            Self::Ping => "Ping",
-            Self::Choke => "Choke(0)",
-            Self::Unchoke => "Unchoke(1)",
-            Self::Interested => "Interested(2)",
-            Self::NotInterested => "NotInterested(3)",
-            Self::Have(_) => "Have(4)",
-            Self::BitField(_) => "BitField(5)",
-            Self::Request(_) => "Request(6)",
-            Self::Piece(_) => "Piece(7)",
-            Self::Cancel(_) => "Cancel(8)",
-            Self::Ext(_) => "Ext(20)",
+            Self::Ping => "Ping".into(),
+            Self::Choke => "Choke(0)".into(),
+            Self::Unchoke => "Unchoke(1)".into(),
+            Self::Interested => "Interested(2)".into(),
+            Self::NotInterested => "NotInterested(3)".into(),
+            Self::Have(_) => "Have(4)".into(),
+            Self::BitField(_) => "BitField(5)".into(),
+            Self::Request(_) => "Request(6)".into(),
+            Self::Piece(_) => "Piece(7)".into(),
+            Self::Cancel(_) => "Cancel(8)".into(),
+            Self::Ext(_) => "Ext(20)".into(),
+            Self::Unknown(n) => format!("Unknown({n})")
         }
     }
 
@@ -251,7 +254,7 @@ impl BTMessage {
             return buf;
         }
 
-        buf.push(self.msg_id());
+        buf.push(self.id());
         match self {
             Self::Have(index) => {
                 buf.write_u32::<NetworkEndian>(*index).unwrap();
@@ -289,9 +292,11 @@ impl BTMessage {
             return Ok(Self::Ping);
         }
 
-        let payload_len = len - 1;
 
         let typ = r.read_u8().await?;
+        
+        let payload_len = len - 1;
+        
         let msg = match typ {
             0 => Self::Choke,
             1 => Self::Unchoke,
@@ -340,8 +345,8 @@ impl BTMessage {
                 r.read_exact(&mut ext_payload).await?;
                 Self::Ext(BTExtMessage::new(ext_id, ext_payload))
             }
-            val => {
-                return Err(Error::UnknownMessageType(val));
+            msg_id => {
+                Self::Unknown(msg_id)
             }
         };
         Ok(msg)

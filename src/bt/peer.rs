@@ -8,10 +8,10 @@ use std::{
     net::{SocketAddr},
     sync::Arc,
 };
-use tokio::net::{
+use tokio::{net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},
     TcpStream,
-};
+}, sync::Notify};
 use tokio::{io::AsyncWriteExt, sync::mpsc, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error};
@@ -46,6 +46,7 @@ pub struct Peer {
     pub addr: Arc<SocketAddr>,
     pub peer_id: Arc<HashId>,
     pub handshake: Arc<BTHandshake>,
+    notify_flush: Arc<Notify>,
 }
 
 impl std::fmt::Debug for Peer {
@@ -76,6 +77,7 @@ impl Peer {
             addr: Arc::new(addr),
             peer_id: handshake.peer_id.into(),
             handshake: Arc::new(handshake),
+            notify_flush: Arc::new(Notify::new())
         };
 
         {
@@ -95,55 +97,40 @@ impl Peer {
         Ok(())
     }
 
-    pub async fn fetch_torrent_file(&self, _info_hash: &HashId) {
-        todo!()
-    }
-
     pub async fn send_message(&self, msg: impl Into<BTMessage>) -> Result<()> {
         self.msg_tcp_tx.send(msg.into()).await?;
         Ok(())
     }
 
-    pub async fn send_ping(&self) -> Result<()> {
-        self.send_message(BTMessage::Ping).await
+    pub async fn send_message_now(&self, msg: impl Into<BTMessage>) -> Result<()> {
+        self.send_message(msg).await?;
+        self.flush()?;
+        Ok(())
     }
 
-    pub async fn send_have(&self, n: usize) -> Result<()> {
-        self.send_message(BTMessage::Have(n as u32)).await
-    }
-
-    pub async fn send_choke(&self) -> Result<()> {
-        self.send_message(BTMessage::Choke).await
-    }
-
-    pub async fn send_unchoke(&self) -> Result<()> {
-        self.send_message(BTMessage::Unchoke).await
-    }
-
-    pub async fn send_interested(&self) -> Result<()> {
-        self.send_message(BTMessage::Interested).await
-    }
-
-    pub async fn send_not_interested(&self) -> Result<()> {
-        self.send_message(BTMessage::NotInterested).await
-    }
-
-    pub async fn send_request(&self, info: PieceInfo) -> Result<()> {
-        self.send_message(BTMessage::Request(info)).await
-    }
-
-    pub async fn send_piece(&self) -> Result<()> {
-        todo!()
+    pub fn flush(&self) -> Result<()> {
+        self.notify_flush.notify_one();
+        Ok(())
     }
 
     async fn write_tcp(self, tx: OwnedWriteHalf, mut msg_tcp_rx: mpsc::Receiver<BTMessage>) {
         let mut buf_tx = tokio::io::BufWriter::new(tx);
         let t = async {
             loop {
-                while let Some(msg) = msg_tcp_rx.recv().await {
-                    buf_tx.write_all(&msg.to_bytes()).await?;
-                    buf_tx.flush().await?;
-                }
+                let time_to_flush = tokio::time::sleep(std::time::Duration::from_secs(15));
+                tokio::select! {
+                    msg_opt = msg_tcp_rx.recv() => {
+                        if let Some(msg) = msg_opt {
+                            buf_tx.write_all(&msg.to_bytes()).await?;
+                        }
+                    }
+                    _ = self.notify_flush.notified() => {
+                        buf_tx.flush().await?;
+                    }
+                    _ = time_to_flush => {
+                        buf_tx.flush().await?;
+                    }
+                };
             }
         };
         tokio::select! {

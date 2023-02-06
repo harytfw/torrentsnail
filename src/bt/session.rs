@@ -17,7 +17,7 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use torrent::{HashId, TorrentInfo};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 const MSG_UT_METADATA: &str = "ut_metadata";
 const METADATA_PIECE_SIZE: usize = 16384;
@@ -354,7 +354,7 @@ impl TorrentSession {
                 state.interested = false
             }
             BTMessage::Request(_info) => {
-                peer.send_choke().await?;
+                peer.send_message_now(BTMessage::Choke).await?;
             }
             BTMessage::Piece(data) => {
                 let mut done = false;
@@ -420,10 +420,13 @@ impl TorrentSession {
             BTMessage::Cancel(_info) => {}
             BTMessage::BitField(_fields) => {}
             BTMessage::Ping => {
-                peer.send_ping().await?;
+                peer.send_message_now(BTMessage::Ping).await?;
             }
             BTMessage::Ext(ext_msg) => {
                 self.handle_ext_msg(peer, ext_msg).await?;
+            }
+            BTMessage::Unknown(id)=>{
+                warn!(?id, "unknown msg id")
             }
         }
         Ok(())
@@ -478,7 +481,7 @@ impl TorrentSession {
                     .and_then(|ext| ext.get_msg_id(MSG_UT_METADATA))
                     .unwrap();
 
-                peer.send_message((msg_id, msg)).await?;
+                peer.send_message_now((msg_id, msg)).await?;
             }
 
             UTMetadataMessage::Reject(index) => {
@@ -578,6 +581,7 @@ impl TorrentSession {
                 let req = UTMetadataMessage::Request(piece.get_index());
                 peer.send_message((msg_id, req)).await?;
             }
+            peer.flush()?;
         }
         Ok(false)
     }
@@ -598,7 +602,7 @@ impl TorrentSession {
 
         if state.choke {
             if !pending.is_empty() {
-                peer.send_interested().await?;
+                peer.send_message_now(BTMessage::Interested).await?;
                 return Ok(state.broken);
             }
             return Ok(state.broken);
@@ -608,7 +612,7 @@ impl TorrentSession {
             return Ok(state.broken);
         }
 
-        let mut req_msgs = vec![];
+        let mut req_piece_info = vec![];
 
         while !pending.is_empty() {
             {
@@ -622,14 +626,15 @@ impl TorrentSession {
             let mut pieces = self.pieces.write().await;
             let piece = pieces.get_mut(frag.get_index()).unwrap();
             piece.on_send_req();
-            req_msgs.push(frag.into());
+            req_piece_info.push(frag.into());
         }
 
-        if !req_msgs.is_empty() {
-            peer.send_interested().await?;
-            for msg in req_msgs {
-                peer.send_request(msg).await?;
+        if !req_piece_info.is_empty() {
+            peer.send_message(BTMessage::Interested).await?;
+            for piece_info in req_piece_info {
+                peer.send_message(BTMessage::Request(piece_info)).await?;
             }
+            peer.flush()?;
         }
 
         Ok(state.broken)
