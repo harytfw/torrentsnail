@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::{bencode, Result};
 use crate::{bencode::to_bytes, Error};
 use serde::{Deserialize, Serialize};
@@ -44,7 +46,7 @@ impl std::fmt::Debug for TorrentInfo {
 }
 
 impl TorrentInfo {
-    pub fn name(&mut self, name: &str) -> &mut Self {
+    pub fn set_name(&mut self, name: &str) -> &mut Self {
         self.name = name.to_owned();
         self
     }
@@ -55,7 +57,7 @@ impl TorrentInfo {
         self
     }
 
-    pub fn get_file_meta(&self) -> Vec<FileMeta> {
+    pub fn get_files_meta(&self) -> Vec<FileMeta> {
         match self.files.as_ref() {
             Some(files) => files.clone(),
             None => vec![FileMeta {
@@ -130,24 +132,37 @@ pub struct TorrentFile {
     pub httpseeds: Vec<String>,
 
     #[serde(skip)]
-    origin_val: Option<Box<bencode::Value>>,
+    origin_content: Option<Box<bencode::Value>>,
 }
 
 impl TorrentFile {
-    pub fn new(info: TorrentInfo) -> Self {
+    pub fn new() -> Self {
         Self {
-            info,
             ..Default::default()
         }
     }
 
-    pub fn set_origin_info_hash(&mut self, val: bencode::Value) -> &mut Self {
-        self.origin_val = Some(val.into());
+    pub fn from_info(info: TorrentInfo) -> Self {
+        Self {
+            info,..Default::default()
+        }
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
+        let data = std::fs::read(path)?;
+        let val: bencode::Value = bencode::from_bytes(&data)?; 
+        let mut tf: Self = bencode::from_bytes(&data)?;
+        tf.origin_content = Some(val.into());
+        Ok(tf)
+    }
+
+    pub fn set_origin_content(&mut self, val: bencode::Value) -> &mut Self {
+        self.origin_content = Some(val.into());
         self
     }
 
     pub fn info_hash(&self) -> Option<HashId> {
-        self.origin_val
+        self.origin_content
             .as_ref()
             .and_then(|val| val.as_dict())
             .and_then(|dict| dict.get("info"))
@@ -165,36 +180,19 @@ mod test {
     use super::*;
     use std::{fs, path};
 
-    use crate::bencode::{from_bytes, to_bytes, Value};
+    use crate::bencode::{from_bytes};
 
     #[test]
-    fn parse_file() {
-        let p = path::Path::new("demo.torrent");
+    fn parse_torrent() {
+        let p = path::Path::new("tests/archlinux.torrent");
         let data = fs::read(p).expect("read torrent");
-        let v: TorrentFile = from_bytes(&data).expect("decode");
-        let out = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open("demo.torrent.json")
-            .unwrap();
-        serde_json::to_writer_pretty(out, &v).unwrap();
-    }
-
-    #[test]
-    fn info_hash_for_bencode() {
-        let p = path::Path::new("./static/v1.b.torrent");
-        let data = fs::read(p).expect("read torrent");
-        let ben_val: Value = from_bytes(&data).expect("decode");
         let tf: TorrentFile = from_bytes(&data).expect("decode");
-        let info = &ben_val["info"];
-        let buf = to_bytes(info).unwrap();
-        let info_hash = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &buf);
 
-        println!("{:?}", tf.info_hash().unwrap());
         assert_eq!(
             tf.info_hash().unwrap().hex(),
-            hex::encode(info_hash.as_ref())
-        )
+            "375ae3280cd80a8e9d7212e11dfaf7c45069dd35"
+        );
+
+        assert_eq!(tf.info.get_files_meta()[0].path[0], "archlinux-2023.02.01-x86_64.iso")
     }
 }

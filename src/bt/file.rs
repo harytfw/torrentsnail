@@ -156,7 +156,7 @@ impl FilePieceMap {
     }
 }
 
-pub fn build_file_map(info: &TorrentInfo) -> Vec<FilePieceMap> {
+pub fn build_file_piece_map(info: &TorrentInfo) -> Vec<FilePieceMap> {
     let base = PathBuf::from("/tmp/snail/").join(&info.name);
 
     let mut piece_frag_que: VecDeque<Fragment> = {
@@ -175,7 +175,7 @@ pub fn build_file_map(info: &TorrentInfo) -> Vec<FilePieceMap> {
     };
 
     let mut ret = vec![];
-    for meta in info.get_file_meta() {
+    for meta in info.get_files_meta() {
         let mut items: Vec<Fragment> = vec![];
         let mut file_frag = Fragment::new(0, 0, 0, meta.length);
         while file_frag.len > 0 {
@@ -214,17 +214,14 @@ pub fn build_file_map(info: &TorrentInfo) -> Vec<FilePieceMap> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{bencode, torrent::TorrentFile};
-    use std::fs;
+    use crate::{torrent::TorrentFile};
 
     use super::*;
 
     #[test]
     fn test_build_file_map() {
-        let data = fs::read("static/v1.b.torrent").unwrap();
-        let torrent: TorrentFile = bencode::from_bytes(&data).unwrap();
-        let file_maps = build_file_map(&torrent.info);
-        println!("{file_maps:?}");
-        println!("{:?}", file_maps[0].fragments);
+        let torrent = TorrentFile::from_path("tests/archlinux.torrent").unwrap();
+        let file_maps = build_file_piece_map(&torrent.info);
+        assert_eq!(file_maps.len(),1)
     }
 }

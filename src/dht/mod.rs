@@ -203,7 +203,6 @@ impl DHTSender {
 
 pub struct DHTInner {
     sender: DHTSender,
-    sock: Arc<UdpSocket>,
     my_id: Arc<HashId>,
     buckets: Vec<Bucket>,
     storage: BTreeMap<HashId, Storage>,
@@ -216,7 +215,6 @@ pub struct DHTInner {
 impl DHTInner {
     fn new(my_id: Arc<HashId>, sock: Arc<UdpSocket>) -> Self {
         let app = Self {
-            sock: sock.clone(),
             my_id: Arc::clone(&my_id),
             buckets: vec![Bucket::new(HashId::zero())],
             storage: Default::default(),
@@ -767,7 +765,7 @@ impl DHTInner {
             match ver {
                 Ok(4) => {
                     let mut node_buf = [0u8; 6];
-                    buf.read_exact(&mut node_buf);
+                    buf.read_exact(&mut node_buf).await?;
                     let node = SocketAddrWithId::from_bytes(&node_buf)?;
                     nodes.push(Node::new(node.get_addr(), node.get_id()));
                 }

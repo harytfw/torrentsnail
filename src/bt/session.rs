@@ -1,4 +1,4 @@
-use crate::bt::file::{build_file_map, FilePieceMap};
+use crate::bt::file::{build_file_piece_map, FilePieceMap};
 use crate::bt::peer::Peer;
 use crate::bt::piece::{Piece, PieceFragment};
 use crate::bt::types::{
@@ -30,21 +30,6 @@ pub enum DownloadState {
 }
 
 #[derive(Clone)]
-pub struct SessionState {
-    download_state: DownloadState,
-    max_metadata_req: usize,
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {
-            download_state: DownloadState::Pause,
-            max_metadata_req: 4,
-        }
-    }
-}
-
-#[derive(Clone)]
 pub struct TorrentSession {
     pub info_hash: Arc<HashId>,
     pub torrent: Arc<RwLock<Option<TorrentFile>>>,
@@ -52,7 +37,7 @@ pub struct TorrentSession {
     peers: Arc<RwLock<Vec<Peer>>>,
     pieces: Arc<RwLock<Vec<Piece>>>,
     torrent_metadata_pieces: Arc<RwLock<Vec<Piece>>>,
-    state: Arc<RwLock<SessionState>>,
+    state: Arc<RwLock<()>>,
     handshake_template: Arc<BTHandshake>,
     cancel: CancellationToken,
     file_maps: Arc<RwLock<Vec<FilePieceMap>>>,
@@ -64,7 +49,7 @@ impl TorrentSession {
         let info_hash = Arc::new(torrent.info_hash().unwrap());
         let pieces = Piece::from_length(torrent.info.total_length(), torrent.info.piece_length);
         let handshake_template = Self::build_handshake(&bt_arc.my_id, &info_hash);
-        let files = build_file_map(&torrent.info);
+        let files = build_file_piece_map(&torrent.info);
         debug!(?info_hash, "new torrent session from info");
 
         let s = Self {
@@ -92,17 +77,13 @@ impl TorrentSession {
 
         debug!(?info_hash, "new torrent session from info hash");
 
-        let state = SessionState {
-            ..Default::default()
-        };
-
         let s = Self {
             bt_weak: bt,
             peers: Arc::new(RwLock::new(vec![])),
             pieces: Arc::new(RwLock::new(vec![])),
             info_hash: Arc::clone(&info_hash),
             cancel: CancellationToken::new(),
-            state: Arc::new(RwLock::new(state)),
+            state: Default::default(),
             torrent_metadata_pieces: Arc::new(RwLock::new(vec![])),
             handshake_template: Arc::new(handshake_template),
             file_maps: Default::default(),
@@ -425,7 +406,7 @@ impl TorrentSession {
             BTMessage::Ext(ext_msg) => {
                 self.handle_ext_msg(peer, ext_msg).await?;
             }
-            BTMessage::Unknown(id)=>{
+            BTMessage::Unknown(id) => {
                 warn!(?id, "unknown msg id")
             }
         }
@@ -521,14 +502,14 @@ impl TorrentSession {
             {
                 debug!("save torrent info");
                 let mut torrent = self.torrent.write().await;
-                *torrent = Some(TorrentFile::new(metadata.clone()))
+                *torrent = Some(TorrentFile::from_info(metadata.clone()))
             }
             let file_maps: Vec<FilePieceMap>;
             {
                 debug!(?total_len, ?piece_len, "construct pieces");
                 let mut pieces = self.pieces.write().await;
                 *pieces = Piece::from_length(total_len, piece_len);
-                file_maps = build_file_map(&metadata);
+                file_maps = build_file_piece_map(&metadata);
             }
             {
                 let mut files = self.file_maps.write().await;

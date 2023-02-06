@@ -229,64 +229,25 @@ impl Session {
     }
 }
 
-type Handle = tokio::task::JoinHandle<Result<()>>;
-
 #[derive(Clone)]
 pub struct TrackerUdpClient {
     sock: Arc<UdpSocket>,
     sessions: Arc<RwLock<Vec<Session>>>,
-    handles: Arc<Mutex<(Option<Handle>,)>>,
     cancel_token: tokio_util::sync::CancellationToken,
 }
 
 impl TrackerUdpClient {
     pub fn new(sock: Arc<UdpSocket>) -> Self {
-        let app = Self {
+        Self {
             sock,
             sessions: Arc::new(RwLock::new(vec![])),
-            handles: Arc::new(Mutex::new(Default::default())),
             cancel_token: Default::default(),
-        };
-        {
-            let handle3 = tokio::spawn(Self::tick(app.clone()));
-            let app_clone = app.clone();
-            tokio::spawn(async move {
-                let mut handles = app_clone.handles.lock().await;
-                *handles = (Some(handle3),);
-            });
         }
-        app
     }
 
     pub async fn shutdown(&self) -> Result<()> {
         self.cancel_token.cancel();
-        let mut handles = self.handles.lock().await;
-        let handle2 = handles.0.take().unwrap();
-
-        match tokio::try_join!(flatten(handle2)) {
-            Ok(_) => Ok(()),
-            Err(Error::Cancel) => Ok(()),
-            Err(e) => {
-                panic!("{}", e);
-            }
-        }
-    }
-
-    async fn tick(self) -> Result<()> {
-        let task = async {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            }
-        };
-
-        tokio::select! {
-            result = task => {
-                result
-            }
-            _ = self.cancel_token.cancelled() => {
-                Err(Error::Cancel)
-            }
-        }
+        Ok(())
     }
 
     pub async fn on_packet(&self, packet: (Vec<u8>, SocketAddr)) -> Result<()> {
@@ -356,52 +317,14 @@ impl TrackerUdpClient {
     }
 }
 
-async fn flatten<T>(handle: tokio::task::JoinHandle<Result<T>>) -> Result<T> {
-    match handle.await {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(err)) => Err(err),
-        Err(err) => Err(Error::Generic(err.to_string())),
-    }
-}
-
 #[cfg(test)]
-mod test {
-    use crate::torrent::HashId;
-    use tracing::Level;
-
+mod tests {
     use super::*;
+
     #[tokio::test]
     async fn test_client() -> Result<()> {
-        std::env::set_var("RUST_LOG", "tracker=debug");
-
-        tracing_subscriber::fmt()
-            .with_writer(tracing_subscriber::fmt::TestWriter::new())
-            .with_max_level(Level::DEBUG)
-            .init();
-
         let sock = Arc::new(UdpSocket::bind("0.0.0.0:8081").await?);
         let client = TrackerUdpClient::new(sock);
-        let tracker_url = "udp://exodus.desync.com:6969";
-        let session = client.add_tracker(tracker_url).await?;
-
-        let mut req = AnnounceRequest::new();
-
-        {
-            let info_hash = HashId::from_hex("274e6a57eae79b2ba5bb8caf28cf847a12a65ed9")?;
-            let peer_id = HashId::from(b"-qB450A-H.8UPTB(DAI2");
-            req.set_info_hash(&info_hash)
-                .set_port(9000)
-                .set_peer_id(&peer_id)
-                .set_key(u32::from_be_bytes([0xe4, 0xcc, 0xe9, 0x4b]))
-                .set_event(Event::Stopped)
-                .set_no_peer_id(true);
-        }
-
-        let _rsp = session.send_connect().await?;
-        let _rsp = session.send_announce(&req).await?;
-        debug!("wait");
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        debug!("shutdown");
         client.shutdown().await?;
         Ok(())
     }
