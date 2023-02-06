@@ -17,7 +17,7 @@ use tracing::{debug, error};
 #[derive(Debug, Clone)]
 pub struct Session {
     sock: Arc<UdpSocket>,
-    addr: Arc<SocketAddrV4>,
+    addr: Arc<SocketAddr>,
     pub url: Arc<String>,
     transactions: Arc<Mutex<HashMap<u32, oneshot::Sender<Response>>>>,
     state: Arc<RwLock<SessionState>>,
@@ -26,7 +26,7 @@ pub struct Session {
 }
 
 impl Session {
-    fn new(cancel: CancellationToken, sock: Arc<UdpSocket>, addr: SocketAddrV4, url: &str) -> Self {
+    fn new(sock: Arc<UdpSocket>, addr: SocketAddr, url: &str) -> Self {
         let (tx, rx) = mpsc::channel(10);
         let state = SessionState::default();
         let session = Self {
@@ -36,7 +36,7 @@ impl Session {
             transactions: Arc::new(Mutex::new(HashMap::new())),
             state: Arc::new(RwLock::new(state)),
             packet_tx: tx,
-            cancel,
+            cancel: CancellationToken::new(),
         };
         {
             let session_clone = session.clone();
@@ -227,6 +227,11 @@ impl Session {
     pub async fn get_state(&self) -> SessionState {
         self.state.read().await.clone()
     }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        self.cancel.cancel();
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -252,15 +257,11 @@ impl TrackerUdpClient {
 
     pub async fn on_packet(&self, packet: (Vec<u8>, SocketAddr)) -> Result<()> {
         let (buf, addr) = packet;
-        let addr_v4 = match addr {
-            SocketAddr::V4(addr) => addr,
-            _ => todo!("not supported ipv6 packet"),
-        };
         let sessions = self.sessions.read().await;
-        if let Some(session) = sessions.iter().find(|s| s.addr.as_ref() == &addr_v4) {
+        if let Some(session) = sessions.iter().find(|s| s.addr.as_ref() == &addr) {
             session.dispatch_packet(buf).await?;
         } else {
-            debug!(addr = ?addr_v4, "tracker session not found")
+            debug!(?addr, "tracker session not found")
         }
         Ok(())
     }
@@ -283,14 +284,9 @@ impl TrackerUdpClient {
         let addr_vec: Vec<SocketAddr> = tokio::net::lookup_host(host_port).await?.collect();
 
         match addr_vec.first() {
-            Some(SocketAddr::V4(addr_v4)) => {
-                debug!(tracker = ?tracker_url, addr = ?addr_v4, "new tracker session");
-                let session = Session::new(
-                    self.cancel_token.clone(),
-                    self.sock.clone(),
-                    *addr_v4,
-                    tracker_url,
-                );
+            Some(addr) => {
+                debug!(tracker = ?tracker_url, ?addr, "new tracker session");
+                let session = Session::new(self.sock.clone(), *addr, tracker_url);
                 {
                     let mut sessions = self.sessions.write().await;
                     sessions.push(session.clone());
@@ -298,7 +294,6 @@ impl TrackerUdpClient {
                 debug!("create tracker session");
                 Ok(session)
             }
-            Some(SocketAddr::V6(_)) => Err(Error::Generic("not support ipv6".into())),
             None => Err(Error::NoAddress),
         }
     }
