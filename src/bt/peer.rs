@@ -1,5 +1,5 @@
 use crate::bt::{
-    types::{BTHandshake, BTMessage, PieceInfo},
+    types::{BTHandshake, BTMessage},
     Error, Result,
 };
 use crate::torrent::HashId;

@@ -1,37 +1,41 @@
-use std::{net::{SocketAddr}, time::Instant};
+use std::{
+    borrow::Borrow,
+    net::SocketAddr,
+    time::{Duration, Instant, SystemTime},
+};
 
 use crate::torrent::HashId;
-use chrono::{prelude::*, Duration};
 use serde::Serialize;
 
 use super::Node;
 
 pub struct SearchNode {
-    pub id: HashId,
-    pub addr: SocketAddr,
-    pub send_query_at: DateTime<Utc>,
-    pub reply_at: Instant,
-    pub replied: bool,
-    pub ack_announce_peer: bool,
-    pub query_acc: usize,
-    pub token: Vec<u8>,
+    id: HashId,
+    addr: SocketAddr,
+    send_query_at: SystemTime,
+    reply_at: Instant,
+    has_replied: bool,
+    ack_announce_peer: bool,
+    query_acc: usize,
+    token: Vec<u8>,
     stats: SearchNodeStats,
 }
 
-impl From<&Node> for SearchNode {
-    fn from(n: &Node) -> Self {
+impl<T: Borrow<Node>> From<T> for SearchNode {
+    fn from(n: T) -> Self {
+        let n: &Node = n.borrow();
         Self {
-            id: n.id,
-            addr: n.addr,
-            replied: false,
+            id: *n.id(),
+            addr: *n.addr(),
+            has_replied: false,
             ack_announce_peer: false,
             query_acc: 0,
-            send_query_at: Utc.timestamp_millis_opt(0).unwrap(),
+            send_query_at: SystemTime::UNIX_EPOCH,
             token: vec![],
             reply_at: Instant::now(),
             stats: SearchNodeStats {
-                id: hex::encode(n.id),
-                addr: n.addr,
+                id: hex::encode(*n.id()),
+                addr: *n.addr(),
                 replied: false,
                 ack_announce_peer: false,
             },
@@ -41,20 +45,40 @@ impl From<&Node> for SearchNode {
 
 impl SearchNode {
     pub fn refresh_stats(&mut self) -> &SearchNodeStats {
-        self.stats.replied = self.replied;
+        self.stats.replied = self.has_replied;
         self.stats.ack_announce_peer = self.ack_announce_peer;
         &self.stats
     }
 
-    pub fn on_reply(&mut self, token: &[u8]) {
-        self.replied = true;
+    pub fn has_replied(&self) -> bool {
+        self.has_replied
+    }
+
+    pub fn on_reply(&mut self, _token: &[u8]) {
+        self.has_replied = true;
         self.reply_at = Instant::now();
-        self.token = token.to_vec();
     }
 
     pub fn on_send_query(&mut self) {
         self.query_acc += 1;
-        self.send_query_at = Utc::now();
+        self.send_query_at = SystemTime::now();
+    }
+
+    pub fn on_announce_peer_response(&mut self) {
+        self.query_acc = 0;
+        self.ack_announce_peer = true;
+    }
+
+    pub fn addr(&self) -> &SocketAddr {
+        &self.addr
+    }
+
+    pub fn id(&self) -> &HashId {
+        &self.id
+    }
+
+    pub fn token(&self) -> &[u8] {
+        &self.token
     }
 }
 
@@ -67,26 +91,26 @@ pub struct SearchNodeStats {
 }
 
 pub struct SearchSession {
-    pub id: u8,
-    pub hash: HashId,
-    nodes_vec: Vec<SearchNode>,
-    stats: SearchSessionStats,
-    start_at: DateTime<Utc>,
+    id: u8,
+    info_hash: HashId,
+    nodes: Vec<SearchNode>,
+    start_at: SystemTime,
+    started: bool,
 }
 
 impl SearchSession {
-    pub fn new(id: u8) -> Self {
+    pub fn new(id: u8, info_hash: HashId) -> Self {
         Self {
             id,
-            hash: Default::default(),
-            nodes_vec: vec![],
-            stats: Default::default(),
-            start_at: Utc::now(),
+            info_hash,
+            nodes: vec![],
+            start_at: SystemTime::UNIX_EPOCH,
+            started: false,
         }
     }
 
     pub fn all_replied(&self) -> bool {
-        self.nodes().iter().all(|n| n.replied)
+        self.nodes().iter().all(|n| n.has_replied)
     }
 
     pub fn all_ack_announce_peer(&self) -> bool {
@@ -98,40 +122,55 @@ impl SearchSession {
     }
 
     pub fn continue_search(&self) -> bool {
-        self.ack_announce_peer_num() <= 3 && Utc::now() - self.start_at < Duration::minutes(30)
+        let elapsed_30_minute = match self.start_at.elapsed() {
+            Ok(dur) => dur > Duration::from_secs(30 * 60),
+            _ => true,
+        };
+        self.started && self.ack_announce_peer_num() <= 3 && elapsed_30_minute
     }
 
-    pub fn search_hash(&mut self, hash: &HashId) {
-        self.start_at = Utc::now();
-        self.hash = *hash;
+    pub fn start(&mut self) {
+        self.started = true;
+        self.start_at = SystemTime::now();
     }
 
-    pub fn reset(&mut self) {
-        self.nodes_vec.clear();
-        self.hash = HashId::zero();
+    pub fn stop(&mut self) {
+        self.started = false;
     }
 
-    pub fn add_node(&mut self, node: &Node) {
-        if self.get_node(&node.id).is_some() {
+    pub fn reset(&mut self, info_hash: HashId) {
+        self.stop();
+        self.nodes.clear();
+        self.info_hash = info_hash;
+    }
+
+    pub fn add_node(&mut self, node: SearchNode) {
+        if self.find_node(node.id()).is_some() {
             return;
         }
-        self.nodes_vec.push(SearchNode::from(node))
+        self.nodes.push(node)
+    }
+
+    pub fn add_many_nodes(&mut self, nodes: impl Iterator<Item = SearchNode>) {
+        for node in nodes {
+            self.add_node(node)
+        }
     }
 
     pub fn nodes(&self) -> &[SearchNode] {
-        &self.nodes_vec
+        &self.nodes
     }
 
-    pub fn nodes_mut(&mut self) -> &mut [SearchNode] {
-        self.nodes_vec.as_mut_slice()
+    pub fn mut_nodes(&mut self) -> &mut [SearchNode] {
+        self.nodes.as_mut_slice()
     }
 
-    pub fn get_node(&self, id: &HashId) -> Option<&SearchNode> {
+    pub fn find_node(&self, id: &HashId) -> Option<&SearchNode> {
         self.nodes().iter().find(|&node| &node.id == id)
     }
 
-    pub fn get_node_mut(&mut self, id: &HashId) -> Option<&mut SearchNode> {
-        self.nodes_mut().iter_mut().find(|node| &node.id == id)
+    pub fn find_mut_node(&mut self, id: &HashId) -> Option<&mut SearchNode> {
+        self.mut_nodes().iter_mut().find(|node| &node.id == id)
     }
 
     pub fn get_peers_tid(&self) -> [u8; 4] {
@@ -144,33 +183,41 @@ impl SearchSession {
         [b'a', b'p', id_hex[0], id_hex[1]]
     }
 
-    pub fn id_hex(&self) -> [u8; 2] {
+    fn id_hex(&self) -> [u8; 2] {
         let id_hex = hex::encode(self.id.to_be_bytes());
-        assert_eq!(id_hex.len(), 2);
         return [id_hex.as_bytes()[0], id_hex.as_bytes()[1]];
     }
 
     pub fn refresh_stats(&mut self) -> SearchSessionStats {
         let nodes = self
-            .nodes_mut()
+            .mut_nodes()
             .iter_mut()
             .map(|n| n.refresh_stats().clone())
             .collect();
-        self.stats.id = self.id;
-        self.stats.hash = hex::encode(self.hash);
-        self.stats.get_peers_tid = String::from_utf8_lossy(&self.get_peers_tid()).to_string();
-        self.stats.announce_peer_tid =
-            String::from_utf8_lossy(&self.get_announce_peers_tid()).to_string();
-        self.stats.all_ack_announce_peer = self.all_ack_announce_peer();
-        self.stats.all_replied = self.all_replied();
-        self.stats.nodes = nodes;
-        self.stats.start_at = self.start_at;
-        self.stats.continue_search = self.continue_search();
-        self.stats.clone()
+
+        SearchSessionStats {
+            id: self.id,
+            hash: hex::encode(self.info_hash),
+            get_peers_tid: String::from_utf8_lossy(&self.get_peers_tid()).to_string(),
+            announce_peer_tid: String::from_utf8_lossy(&self.get_announce_peers_tid()).to_string(),
+            all_ack_announce_peer: self.all_ack_announce_peer(),
+            all_replied: self.all_replied(),
+            nodes,
+            start_at: self.start_at,
+            continue_search: self.continue_search(),
+        }
+    }
+
+    pub fn info_hash(&self) -> &HashId {
+        &self.info_hash
+    }
+
+    pub fn id(&self) -> u8 {
+        self.id
     }
 }
 
-#[derive(Default, Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchSessionStats {
     pub id: u8,
     pub hash: String,
@@ -178,7 +225,20 @@ pub struct SearchSessionStats {
     pub announce_peer_tid: String,
     pub all_ack_announce_peer: bool,
     pub all_replied: bool,
-    pub start_at: DateTime<Utc>,
+    pub start_at: SystemTime,
     pub continue_search: bool,
     pub nodes: Vec<SearchNodeStats>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_search_session() {
+        let mut ss = SearchSession::new(0, HashId::zero());
+        ss.start();
+        ss.stop();
+        ss.reset(HashId::zero());
+    }
 }

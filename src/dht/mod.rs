@@ -4,18 +4,18 @@ use crate::bencode::to_bytes;
 use crate::torrent::HashId;
 use crate::{Error, Result};
 use bucket::BucketStats;
-use chrono::prelude::*;
-use chrono::Duration;
-use rand::{random, Rng};
+use rand::random;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 use std::{fs, path};
-use storage::StorageStats;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -24,13 +24,11 @@ use tracing::{debug, error};
 mod bucket;
 mod node;
 mod search;
-mod storage;
 mod token;
 mod types;
 pub use bucket::Bucket;
 pub use node::Node;
-pub use search::{SearchSession, SearchSessionStats};
-pub use storage::Storage;
+pub use search::{SearchNode, SearchSession, SearchSessionStats};
 pub use token::TokenManager;
 pub use types::{
     AnnouncePeerQuery, AnnouncePeerResponse, DHTError, FindNodeQuery, FindNodeResponse,
@@ -56,7 +54,6 @@ pub struct DHTStats {
     announce_peer_response: usize,
     error: usize,
     buckets_stats: Vec<BucketStats>,
-    storage_stats: Vec<StorageStats>,
     search_session_stats: Vec<SearchSessionStats>,
 }
 
@@ -205,28 +202,25 @@ pub struct DHTInner {
     sender: DHTSender,
     my_id: Arc<HashId>,
     buckets: Vec<Bucket>,
-    storage: BTreeMap<HashId, Storage>,
+    peer_storage: BTreeMap<HashId, BTreeSet<SocketAddr>>,
     token_manager: TokenManager,
-    last_new_node_at: DateTime<Utc>,
+    last_new_node_at: SystemTime,
     search: BTreeMap<HashId, SearchSession>,
     stats: DHTStats,
 }
 
 impl DHTInner {
     fn new(my_id: Arc<HashId>, sock: Arc<UdpSocket>) -> Self {
-        let app = Self {
+        Self {
             my_id: Arc::clone(&my_id),
             buckets: vec![Bucket::new(HashId::zero())],
-            storage: Default::default(),
-            last_new_node_at: Utc::now(),
+            peer_storage: Default::default(),
+            last_new_node_at: SystemTime::UNIX_EPOCH,
             token_manager: TokenManager::new(),
             search: Default::default(),
             sender: DHTSender::new(sock, Arc::clone(&my_id)),
             stats: Default::default(),
-        };
-
-        debug!(my_id = ?app.my_id);
-        app
+        }
     }
 
     async fn new_node(&mut self, addr: &SocketAddr, id: &HashId) -> Result<()> {
@@ -234,54 +228,52 @@ impl DHTInner {
             return Ok(());
         }
 
+        let node = Node::new(*id, *addr);
+
         for ss in self.search.values_mut() {
             if !ss.continue_search() {
                 continue;
             }
-            ss.add_node(&Node::new(addr, id));
+            ss.add_node(SearchNode::from(&node));
         }
 
-        let now = Utc::now();
+        self.last_new_node_at = SystemTime::now();
 
-        self.last_new_node_at = now;
-
-        let bucket_index = Self::find_bucket_index(&self.buckets, id);
+        let bucket_index = self.find_bucket_index(id);
         let bucket = &mut self.buckets[bucket_index];
-        bucket.last_changed_at = now;
+        bucket.on_change();
 
-        if let Some(_exists_node) = bucket.get_node_mut(id) {
+        if let Some(_exists_node) = bucket.get_by_id_mut(id) {
             return Ok(());
         }
 
-        if let Some(index) = bucket.bad_node_index(now) {
-            debug!(bad_node = ?bucket.nodes[index], new_peer = ?addr, "replace bad node");
-            bucket.nodes[index] = Node::new(addr, id);
+        if let Some(bad_node) = bucket.bad_node().and_then(|index| bucket.get_mut(index)) {
+            *bad_node = node;
             return Ok(());
         }
 
-        if bucket.nodes.len() < 8 {
+        if bucket.nodes_num() < 8 {
             debug!("bucket has space, insert new node");
-            bucket.nodes.push(Node::new(addr, id));
-            bucket.nodes.sort();
+            bucket.add_node(node);
             return Ok(());
         }
 
         debug!(?bucket.min_id, "bucket is full, split bucket");
 
         let mut ping_addr = None;
-        if let Some(index) = bucket.questionable_node_index(now) {
-            let q_node = &mut bucket.nodes[index];
+        if let Some(q_node) = bucket
+            .problem_node()
+            .and_then(|index| bucket.get_mut(index))
+        {
             debug!(node = ?q_node, "send ping to questionable node");
-            if q_node.should_ping(now) {
-                q_node.query_acc += 1;
-                ping_addr = Some(q_node.addr);
+            if q_node.should_ping() {
+                q_node.on_ping();
+                ping_addr = Some(*q_node.addr());
             }
         }
 
-        let new_bucket = Self::split_bucket(bucket, Node::new(addr, id));
-
-        debug!(origin_min_id = ?bucket.min_id, new_min_id = ?new_bucket.min_id ,"split bucket done");
-
+        let new_bucket = bucket.split_half();
+        bucket.add_node(node);
         self.buckets.insert(bucket_index + 1, new_bucket);
 
         if let Some(addr) = ping_addr {
@@ -291,44 +283,17 @@ impl DHTInner {
         Ok(())
     }
 
-    fn find_bucket_index(buckets: &[Bucket], id: &HashId) -> usize {
+    fn find_bucket_index(&self, id: &HashId) -> usize {
         //  6
         // [0, 5, 10]
         let mut target = 0;
-        for (i, b) in buckets.iter().enumerate() {
+        for (i, b) in self.buckets.iter().enumerate() {
             if id < &b.min_id {
                 break;
             }
             target = i;
         }
         target
-    }
-
-    fn split_bucket(bucket: &mut Bucket, new_node: Node) -> Bucket {
-        assert!(bucket.nodes.len() == 8);
-
-        let mut nodes: Vec<Node> = vec![];
-        nodes.append(&mut bucket.nodes);
-        nodes.push(new_node);
-        nodes.sort();
-
-        let mid_id = nodes[nodes.len() / 2].id;
-
-        let mut new_bucket = Bucket::new(mid_id);
-
-        for node in nodes.into_iter() {
-            if node.id < mid_id {
-                bucket.nodes.push(node);
-            } else {
-                new_bucket.nodes.push(node);
-            }
-        }
-
-        assert!(bucket.min_id < new_bucket.min_id);
-        assert!(!bucket.nodes.is_empty());
-        assert!(!new_bucket.nodes.is_empty());
-        debug!(new_bucket =?new_bucket, origin_bucket = ?bucket, "split bucket");
-        new_bucket
     }
 
     pub async fn on_packet(&mut self, packet: (Vec<u8>, SocketAddr)) -> Result<()> {
@@ -346,61 +311,48 @@ impl DHTInner {
     }
 
     async fn on_recv(&mut self, addr: &SocketAddr, qor: QueryResponse) -> Result<()> {
-        let now = Utc::now();
-
-        let node_query = |node: &mut Node| {
-            node.query_acc = 0;
-            node.active_at = now;
-        };
-
-        let node_response = |node: &mut Node| {
-            node.query_acc = 0;
-            node.active_at = now;
-            node.reply_at = Some(now);
-        };
-
         match qor {
             QueryResponse::Query(q) => match q {
                 Query::Ping(q) => {
                     self.stats.ping_query += 1;
-                    self.update_node(q.get_id(), node_query);
+                    self.update_node(q.get_id(), Node::on_query);
                     self.on_ping_query(addr, &q).await?;
                 }
                 Query::FindNode(q) => {
                     self.stats.find_node_query += 1;
-                    self.update_node(q.get_id(), node_query);
+                    self.update_node(q.get_id(), Node::on_query);
                     self.on_find_node_query(addr, &q).await?;
                 }
                 Query::GetPeers(q) => {
                     self.stats.get_peers_query += 1;
-                    self.update_node(q.get_id(), node_query);
+                    self.update_node(q.get_id(), Node::on_query);
                     self.on_get_peers_query(addr, &q).await?;
                 }
                 Query::AnnouncePeer(q) => {
                     self.stats.announce_peer_query += 1;
-                    self.update_node(q.get_id(), node_query);
+                    self.update_node(q.get_id(), Node::on_query);
                     self.on_announce_peer_query(addr, &q).await?;
                 }
             },
             QueryResponse::Response(r) => match r {
-                Response::Ping(r) => {
+                Response::Ping(rsp) => {
                     self.stats.ping_response += 1;
-                    self.update_node(r.get_id(), node_response);
-                    self.on_ping_response(addr, &r).await?;
+                    self.update_node(rsp.get_id(), Node::on_response);
+                    self.on_ping_response(addr, &rsp).await?;
                 }
                 Response::FindNode(rsp) => {
                     self.stats.find_node_response += 1;
-                    self.update_node(rsp.get_id(), node_response);
+                    self.update_node(rsp.get_id(), Node::on_response);
                     self.on_find_node_response(addr, &rsp).await?;
                 }
                 Response::AnnouncePeer(rsp) => {
                     self.stats.announce_peer_response += 1;
-                    self.update_node(rsp.get_id(), node_response);
+                    self.update_node(rsp.get_id(), Node::on_response);
                     self.on_announce_peer_response(addr, &rsp).await?;
                 }
                 Response::GetPeers(rsp) => {
                     self.stats.get_peers_response += 1;
-                    self.update_node(rsp.get_id(), node_response);
+                    self.update_node(rsp.get_id(), Node::on_response);
                     self.on_get_peers_response(addr, &rsp).await?;
                 }
             },
@@ -413,44 +365,44 @@ impl DHTInner {
     }
 
     async fn search_info_hash(&mut self, hash: &HashId) -> Result<()> {
-        let nodes = {
+        let nodes: Vec<SearchNode> = {
             let mut res = vec![];
             for bucket in self.buckets.iter() {
-                for node in bucket.nodes.iter() {
+                for node in bucket.nodes().iter() {
                     if node.is_active() {
-                        res.push(node.clone());
+                        res.push(SearchNode::from(node));
                     }
                 }
             }
             res
         };
 
-        let start_search = |session: &mut SearchSession| {
-            debug!(session_id = ?session.id, hash = ?hex::encode(hash), "try search hash");
-            for node in nodes {
-                session.add_node(&node);
-            }
-            session.search_hash(hash);
-        };
+        // let start_search = |session: &mut SearchSession| {
+        //     debug!(session_id = ?session.id(), hash = ?hex::encode(hash), "try search hash");
+        //     for node in nodes {
+        //         session.add_node(node.clone());
+        //     }
+        //     session.start();
+        // };
 
         let search = &mut self.search;
 
-        for ss in search.values_mut() {
-            if !ss.continue_search() {
-                ss.reset();
-            }
-        }
-
         if let Some(session) = search.get_mut(hash) {
             debug!(hash = ?hash, "use exists search session");
-            start_search(session);
+            session.add_many_nodes(nodes.into_iter());
+            session.start();
             return Ok(());
         }
 
-        if let Some(mut session) = search.remove(&HashId::zero()) {
+        if let Some(session) =
+            search
+                .iter_mut()
+                .find_map(|(_, s)| if !s.continue_search() { Some(s) } else { None })
+        {
             debug!(hash = ?hash, "use empty hash search session");
-            session.reset();
-            start_search(&mut session);
+            session.reset(*hash);
+            session.add_many_nodes(nodes.into_iter());
+            session.start();
             return Ok(());
         }
 
@@ -458,8 +410,9 @@ impl DHTInner {
             let len = search.len() as u8;
             let session = search
                 .entry(*hash)
-                .or_insert_with(|| SearchSession::new(len));
-            start_search(session);
+                .or_insert_with(|| SearchSession::new(len, *hash));
+            session.add_many_nodes(nodes.into_iter());
+            session.start();
             return Ok(());
         }
 
@@ -481,11 +434,11 @@ impl DHTInner {
     async fn on_find_node_query(&mut self, addr: &SocketAddr, query: &FindNodeQuery) -> Result<()> {
         self.new_node(addr, query.get_id()).await?;
 
-        let index = Self::find_bucket_index(&self.buckets, query.get_id());
+        let index = self.find_bucket_index(query.get_id());
 
         let compact_nodes: CompactNodesV4 = CompactNodesV4::from_v4(
             self.buckets[index]
-                .nodes
+                .nodes()
                 .iter()
                 .map(SocketAddrWithId::from)
                 .collect(),
@@ -514,14 +467,14 @@ impl DHTInner {
 
     async fn on_get_peers_query(&mut self, addr: &SocketAddr, q: &GetPeersQuery) -> Result<()> {
         self.new_node(addr, q.get_id()).await?;
-        let storage = &mut self.storage;
+        let storage = &mut self.peer_storage;
         let storage = storage
             .entry(*q.get_info_hash())
-            .or_insert_with(|| Storage::new(q.get_info_hash()));
+            .or_insert_with(BTreeSet::new);
 
-        if !storage.peers.is_empty() {
+        if !storage.is_empty() {
             // send peer info that we know
-            let peers: Vec<SocketAddr> = storage.peers.iter().take(100).cloned().collect();
+            let peers: Vec<SocketAddr> = storage.iter().take(100).cloned().collect();
             self.sender
                 .reply_get_peers(
                     addr,
@@ -536,9 +489,9 @@ impl DHTInner {
 
         // we don't have peer info about queried info_hash, send node info instead
 
-        let bucket = &self.buckets[Self::find_bucket_index(&self.buckets, q.get_id())];
+        let bucket = &self.buckets[self.find_bucket_index(q.get_id())];
         let compact_nodes =
-            CompactNodesV4::from_v4(bucket.nodes.iter().map(SocketAddrWithId::from).collect())?;
+            CompactNodesV4::from_v4(bucket.nodes().iter().map(SocketAddrWithId::from).collect())?;
 
         self.sender
             .reply_get_peers(
@@ -551,7 +504,6 @@ impl DHTInner {
             .await?;
         Ok(())
     }
-
     async fn on_get_peers_response(
         &mut self,
         addr: &SocketAddr,
@@ -562,7 +514,7 @@ impl DHTInner {
         let mut searched_hash = None;
         for ss in self.search.values() {
             if ss.get_peers_tid() == rsp.get_t() {
-                searched_hash = Some(ss.hash);
+                searched_hash = Some(*ss.info_hash());
                 break;
             }
         }
@@ -573,7 +525,7 @@ impl DHTInner {
             let mut new_peers = vec![];
             let mut new_nodes = vec![];
 
-            if let Some(node) = ss.get_node_mut(rsp.get_id()) {
+            if let Some(node) = ss.find_mut_node(rsp.get_id()) {
                 node.on_reply(rsp.get_token());
 
                 debug!(peer = ?addr, ?hash, ?rsp, "on get peers response");
@@ -593,11 +545,10 @@ impl DHTInner {
                 self.new_node(node.get_addr(), node.get_id()).await?;
             }
 
-            if let Some(storage) = self.storage.get_mut(&hash) {
-                // save peer info
-                for peer in new_peers {
-                    storage.add_peer(peer);
-                }
+            if let Some(storage) = self.peer_storage.get_mut(&hash) {
+                const MAX_PEERS: usize = 100;
+                let permit = MAX_PEERS - storage.len();
+                storage.extend(new_peers.into_iter().map(SocketAddr::from).take(permit));
             }
         }
         Ok(())
@@ -620,11 +571,11 @@ impl DHTInner {
         }
 
         let entry = self
-            .storage
+            .peer_storage
             .entry(*q.get_info_hash())
-            .or_insert_with(|| Storage::new(q.get_info_hash()));
+            .or_insert_with(BTreeSet::new);
 
-        entry.add_peer(addr);
+        entry.insert(*addr);
 
         self.sender.reply_announce_peer(addr, q.get_t()).await?;
         Ok(())
@@ -641,9 +592,8 @@ impl DHTInner {
             if ss.get_announce_peers_tid() != rsp.get_t() {
                 continue;
             }
-            if let Some(node) = ss.get_node_mut(rsp.get_id()) {
-                node.ack_announce_peer = true;
-                node.query_acc = 0;
+            if let Some(node) = ss.find_mut_node(rsp.get_id()) {
+                node.on_announce_peer_response()
             }
         }
 
@@ -660,15 +610,12 @@ impl DHTInner {
     }
 
     async fn do_ping_tick(&mut self) -> Result<()> {
-        let now = Utc::now();
-
         let mut ping_addr = vec![];
         for bucket in self.buckets.iter_mut() {
-            for node in bucket.nodes.iter_mut() {
-                if node.should_ping(now) {
-                    node.last_ping_at = now;
-                    node.query_acc += 1;
-                    ping_addr.push(node.addr);
+            for node in bucket.mut_nodes() {
+                if node.should_ping() {
+                    node.on_ping();
+                    ping_addr.push(*node.addr());
                 }
             }
         }
@@ -691,19 +638,24 @@ impl DHTInner {
     }
 
     async fn do_find_node_tick(&mut self) -> Result<()> {
-        let now = Utc::now();
+        let find_node = match self.last_new_node_at.elapsed() {
+            Ok(dur) => dur > Duration::from_secs(15),
+            _ => true,
+        };
 
-        if now - self.last_new_node_at > Duration::seconds(15) {
-            if let Some((i, j)) = self.random_node_index() {
-                debug!("try to find new nodes");
-                let random_id = self.random_closest_id();
-
-                let node = &mut self.buckets[i].nodes[j];
-                node.query_acc += 1;
-
-                self.sender.send_find_node(&node.addr, &random_id).await?;
-            }
+        if !find_node {
+            return Ok(());
         }
+
+        if let Some((i, j)) = self.random_node() {
+            debug!("try to find new nodes");
+            let random_id = self.random_closest_id();
+
+            let node = &mut self.buckets[i].get_mut(j).unwrap();
+            node.on_query();
+            self.sender.send_find_node(node.addr(), &random_id).await?;
+        }
+
         Ok(())
     }
 
@@ -716,16 +668,16 @@ impl DHTInner {
                 if !session.continue_search() {
                     continue;
                 }
-                let hash = session.hash;
+                let hash = *session.info_hash();
                 let tid = session.get_peers_tid();
-                for node in session.nodes_mut() {
+                for node in session.mut_nodes() {
                     if max_concurrent_search_cnt < 0 {
                         continue;
                     }
-                    if !node.replied {
+                    if !node.has_replied() {
                         node.on_send_query();
                         max_concurrent_search_cnt -= 1;
-                        pending_search.push((node.addr, tid, hash));
+                        pending_search.push((*node.addr(), tid, hash));
                     }
                 }
             }
@@ -733,11 +685,11 @@ impl DHTInner {
 
         debug!(pending = ?pending_search, "pending search peer");
 
-        let storage = &mut self.storage;
+        let storage = &mut self.peer_storage;
         for pending in pending_search {
             let (addr, tid, hash) = pending;
 
-            storage.entry(hash).or_insert_with(|| Storage::new(&hash));
+            storage.entry(hash).or_insert_with(BTreeSet::new);
 
             self.sender.send_get_peers(&addr, &tid, &hash).await?;
         }
@@ -754,7 +706,7 @@ impl DHTInner {
             return Ok(());
         }
 
-        let mut nodes = vec![];
+        let mut nodes: Vec<Node> = vec![];
 
         let file = fs::File::options().read(true).open(path)?;
         let file = tokio::fs::File::from(file);
@@ -767,7 +719,7 @@ impl DHTInner {
                     let mut node_buf = [0u8; 6];
                     buf.read_exact(&mut node_buf).await?;
                     let node = SocketAddrWithId::from_bytes(&node_buf)?;
-                    nodes.push(Node::new(node.get_addr(), node.get_id()));
+                    nodes.push(node.into());
                 }
                 Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => {
                     break;
@@ -777,7 +729,7 @@ impl DHTInner {
         }
 
         for node in nodes {
-            self.new_node(&node.addr, &node.id).await?;
+            self.new_node(node.addr(), node.id()).await?;
         }
 
         Ok(())
@@ -800,8 +752,8 @@ impl DHTInner {
         let file = tokio::fs::File::from(file);
         let mut buf = tokio::io::BufWriter::new(file);
         for bucket in self.buckets.iter() {
-            for node in bucket.nodes.iter() {
-                let addr_with_id = SocketAddrWithId::new(&node.id, &node.addr);
+            for node in bucket.nodes().iter() {
+                let addr_with_id = SocketAddrWithId::new(node.id(), node.addr());
                 buf.write_all_buf(&mut addr_with_id.to_bytes().as_slice())
                     .await?;
             }
@@ -813,22 +765,6 @@ impl DHTInner {
         Ok(())
     }
 
-    fn random_node_index(&self) -> Option<(usize, usize)> {
-        assert_ne!(self.buckets.len(), 0);
-
-        let mut rng = rand::thread_rng();
-
-        let b_index = rng.gen_range(0..self.buckets.len());
-
-        if self.buckets[b_index].nodes.is_empty() {
-            return None;
-        }
-
-        let n_index = rng.gen_range(0..self.buckets[b_index].nodes.len());
-
-        Some((b_index, n_index))
-    }
-
     fn random_closest_id(&self) -> HashId {
         let mut id = *self.my_id.clone();
         id[19] = random::<u8>();
@@ -838,9 +774,9 @@ impl DHTInner {
     fn closest_good_node(&self) -> Option<&Node> {
         let mut good_nodes = vec![];
         for bucket in self.buckets.iter() {
-            for node in bucket.nodes.iter() {
+            for node in bucket.nodes().iter() {
                 if node.is_active() {
-                    good_nodes.push((self.my_id.distance(&node.id), node));
+                    good_nodes.push((self.my_id.distance(node.id()), node));
                 }
             }
         }
@@ -856,7 +792,7 @@ impl DHTInner {
             if id < &bucket.min_id {
                 continue;
             }
-            if let Some(node) = bucket.get_node_mut(id) {
+            if let Some(node) = bucket.get_by_id_mut(id) {
                 return Some(f(node));
             }
         }
@@ -867,13 +803,6 @@ impl DHTInner {
         let bucket_stats: Vec<BucketStats> = {
             self.buckets
                 .iter_mut()
-                .map(|b| b.refresh_stats().clone())
-                .collect()
-        };
-
-        let storage_stats: Vec<StorageStats> = {
-            self.storage
-                .values_mut()
                 .map(|b| b.refresh_stats().clone())
                 .collect()
         };
@@ -903,7 +832,6 @@ impl DHTInner {
         );
         stats.search_session_replied_num = search_stats.iter().filter(|s| s.all_replied).count();
         stats.buckets_stats = bucket_stats;
-        stats.storage_stats = storage_stats;
         stats.search_session_stats = search_stats;
 
         stats.clone()
@@ -911,6 +839,24 @@ impl DHTInner {
 
     pub async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    fn random_node(&self) -> Option<(usize, usize)> {
+        use rand::Rng;
+
+        assert_ne!(self.buckets.len(), 0);
+
+        let mut rng = rand::thread_rng();
+
+        let b_index = rng.gen_range(0..self.buckets.len());
+
+        if self.buckets[b_index].nodes_num() == 0 {
+            return None;
+        }
+
+        let n_index = rng.gen_range(0..self.buckets[b_index].nodes_num());
+
+        Some((b_index, n_index))
     }
 }
 
@@ -989,9 +935,9 @@ impl DHT {
     pub async fn get_peers(&self, info_hash: &HashId) -> Vec<SocketAddr> {
         let inner = self.inner.read().await;
         inner
-            .storage
+            .peer_storage
             .get(info_hash)
-            .map(|storage| storage.peers.to_vec())
+            .map(|storage| storage.iter().cloned().collect())
             .unwrap_or_else(Vec::new)
     }
 
@@ -1000,9 +946,9 @@ impl DHT {
         let sender = inner.sender.clone();
         let info_hash_arc = Arc::new(*info_hash);
         for bucket in inner.buckets.iter() {
-            for node in bucket.nodes.iter() {
+            for node in bucket.nodes().iter() {
                 if node.is_active() {
-                    let dest_addr = node.addr;
+                    let dest_addr = *node.addr();
                     let sender_clone = sender.clone();
                     let info_hash_arc = Arc::clone(&info_hash_arc);
                     tokio::spawn(async move {

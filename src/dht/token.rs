@@ -48,3 +48,29 @@ impl TokenManager {
         self.secrets[0] = rand::random();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddrV4;
+    #[test]
+    fn test_token() {
+        let mut tm = TokenManager::new();
+        
+        let addr: SocketAddr = "192.168.1.1:8080".parse::<SocketAddrV4>().unwrap().into();
+        let addr2: SocketAddr = "192.168.1.2:8080".parse::<SocketAddrV4>().unwrap().into();
+        
+        let token = tm.make_token(&addr);
+        assert!(tm.verify(&addr, &token));
+        
+        tm.refresh_secret();
+        assert!(tm.verify(&addr, &token));
+        
+        tm.refresh_secret();
+        assert!(!tm.verify(&addr, &token));
+
+
+        assert!(!tm.verify(&addr, &[1]));
+        assert!(!tm.verify(&addr2, &token));
+    }
+}
