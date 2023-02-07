@@ -228,7 +228,7 @@ impl BT {
         .await
     }
 
-    pub async fn add_tracker(self: Arc<Self>, url: &str) -> Result<()> {
+    pub async fn add_tracker(self: &Arc<Self>, url: &str) -> Result<()> {
         self.tracker.add_tracker(url).await?;
         Ok(())
     }
