@@ -1,11 +1,12 @@
-use super::types::*;
 use crate::bencode;
 use crate::tracker::client::SessionState;
+use crate::tracker::types::*;
 use crate::{Error, Result};
 use reqwest::StatusCode;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::error;
 
 #[derive(Clone)]
 pub struct Session {
@@ -19,25 +20,42 @@ impl Session {
         Self {
             http_client,
             url: Arc::new(url.to_string()),
-            state: Default::default(),
+            state: Arc::new(RwLock::from(SessionState {
+                connected: true,
+                ..Default::default()
+            })),
         }
     }
 
     pub async fn send_announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponseHttp> {
+        let state = { self.state.read().await.clone() };
+
+        if !state.can_announce() {
+            return Err(Error::SkipAnnounce);
+        }
+
         let mut http_req = self.http_client.get(self.url.as_str()).build()?;
         http_req.url_mut().set_query(Some(&req.to_query_string()));
         let rsp = self.http_client.execute(http_req).await?;
         match rsp.status() {
             StatusCode::OK => {
                 let bytes = rsp.bytes().await?;
-                if let Ok(rsp) = bencode::from_bytes::<AnnounceResponseHttp, _>(&bytes) {
-                    Ok(rsp)
-                } else if let Ok(anything) = bencode::from_bytes::<bencode::Value, _>(&bytes) {
-                    Err(Error::Generic(format!(
-                        "decode failed, raw value: {anything:?}"
-                    )))
-                } else {
-                    Err(Error::Generic("decode failed".into()))
+                match bencode::from_bytes::<AnnounceResponseHttp, _>(&bytes) {
+                    Ok(rsp) => {
+                        let mut state = self.state.write().await;
+                        state.on_announce_response(std::time::Duration::from_secs(rsp.interval));
+                        return Ok(rsp);
+                    }
+                    Err(err) => {
+                        error!(?err)
+                    }
+                }
+                match bencode::from_bytes::<bencode::Value, _>(&bytes) {
+                    Ok(val) => {
+                        error!(?val);
+                        Err(Error::Generic("decode response failed".into()))
+                    }
+                    Err(err) => Err(err),
                 }
             }
             code => Err(Error::Generic(format!("http code: {code}"))),

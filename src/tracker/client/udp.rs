@@ -1,11 +1,9 @@
 use crate::tracker::types::*;
 use crate::tracker::SessionState;
-use crate::tracker::SessionStatus;
 use crate::{Error, Result};
 use std::collections::HashMap;
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -138,7 +136,7 @@ impl Session {
     pub async fn send_connect(&self) -> Result<ConnectResponse> {
         let state = { self.state.read().await.clone() };
 
-        if state.status.is_connected() {
+        if state.connected {
             return Err(Error::Generic("already connected".into()));
         }
 
@@ -154,9 +152,9 @@ impl Session {
                 Response::Connect(rsp) => {
                     {
                         let mut state = self.state.write().await;
-                        if state.status.is_disconnected() {
+                        if !state.connected {
                             state.conn_id = rsp.connection_id;
-                            state.status = SessionStatus::Connected;
+                            state.connected = true;
                             debug!("connected");
                         }
                     }
@@ -175,14 +173,8 @@ impl Session {
     pub async fn send_announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponseV4> {
         let state = { self.state.read().await.clone() };
 
-        if state.status.is_disconnected() {
-            return Err(Error::Generic("not connected".into()));
-        }
-
-        if let Some(announce_at) = state.last_announce_at {
-            if announce_at.elapsed() < state.announce_interval {
-                return Err(Error::SkipAnnounce);
-            }
+        if !state.can_announce() {
+            return Err(Error::SkipAnnounce);
         }
 
         let (transaction_id, rx) = self.new_transaction().await;
@@ -200,9 +192,9 @@ impl Session {
                 Response::AnnounceV4(rsp) => {
                     {
                         let mut state = self.state.write().await;
-                        state.last_announce_at = Some(Instant::now());
-                        state.announce_interval =
-                            std::time::Duration::from_secs(rsp.interval as u64);
+                        state.on_announce_response(std::time::Duration::from_secs(
+                            rsp.interval as u64,
+                        ));
                     }
                     Ok(rsp)
                 }

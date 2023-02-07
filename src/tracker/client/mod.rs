@@ -11,29 +11,29 @@ use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{debug, error};
 pub use udp::TrackerUdpClient;
 
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
-pub enum SessionStatus {
-    #[default]
-    Disconnect,
-    Connected,
-}
-
-impl SessionStatus {
-    pub fn is_disconnected(&self) -> bool {
-        matches!(self, Self::Disconnect)
-    }
-
-    pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected)
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct SessionState {
-    status: SessionStatus,
-    conn_id: u64,
-    announce_interval: Duration,
-    last_announce_at: Option<Instant>,
+    pub connected: bool,
+    pub conn_id: u64,
+    pub announce_interval: Duration,
+    pub last_announce_at: Option<Instant>,
+}
+
+impl SessionState {
+    pub fn can_announce(&self) -> bool {
+        if !self.connected {
+            return false;
+        }
+
+        self.last_announce_at
+            .map(|at| at.elapsed() < self.announce_interval)
+            .unwrap_or(true)
+    }
+
+    pub fn on_announce_response(&mut self, interval: Duration) {
+        self.last_announce_at = Some(Instant::now());
+        self.announce_interval = interval
+    }
 }
 
 pub enum Session {

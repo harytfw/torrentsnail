@@ -1,4 +1,4 @@
-use crate::addr::CompactPeer;
+use crate::addr::CompactPeerV4;
 use crate::torrent::HashId;
 use crate::{Error, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -530,12 +530,13 @@ pub struct AnnounceResponseHttp {
         skip_serializing_if = "Option::is_none"
     )]
     pub external_ip: Option<Vec<u8>>,
+
     #[serde(default)]
-    pub peers: CompactPeer,
+    pub peers: CompactPeerV4,
 
     // bep-007
     #[serde(default)]
-    pub peers6: CompactPeer,
+    pub peers6: CompactPeerV4,
 
     #[serde(default)]
     pub failure: Option<String>,

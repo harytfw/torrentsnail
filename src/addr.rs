@@ -208,22 +208,22 @@ impl IpAddrBytes {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct CompactPeer(Vec<SocketAddrBytes>);
+pub struct CompactPeerV4(Vec<SocketAddrBytes>);
 
-impl FromIterator<SocketAddrBytes> for CompactPeer {
+impl FromIterator<SocketAddrBytes> for CompactPeerV4 {
     fn from_iter<T: IntoIterator<Item = SocketAddrBytes>>(iter: T) -> Self {
         Self(iter.into_iter().collect())
     }
 }
 
-impl Deref for CompactPeer {
+impl Deref for CompactPeerV4 {
     type Target = Vec<SocketAddrBytes>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for CompactPeer {
+impl DerefMut for CompactPeerV4 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
@@ -232,7 +232,7 @@ impl DerefMut for CompactPeer {
 struct CompactPeerV4Visitor;
 
 impl<'de> de::Visitor<'de> for CompactPeerV4Visitor {
-    type Value = CompactPeer;
+    type Value = CompactPeerV4;
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(formatter, "CompactNodeInfoList")
     }
@@ -248,27 +248,29 @@ impl<'de> de::Visitor<'de> for CompactPeerV4Visitor {
     where
         E: de::Error,
     {
+        const SIZE: usize = 4 + 2;
+
         let mut list: Vec<SocketAddrBytes> = vec![];
 
-        while !v.is_empty() {
-            let info =
-                SocketAddrBytes::from_bytes(v).map_err(|e| de::Error::custom(e.to_string()))?;
+        while v.len() >= SIZE {
+            let info = SocketAddrBytes::from_bytes(&v[..SIZE])
+                .map_err(|e| de::Error::custom(e.to_string()))?;
             list.push(info);
-            v = &v[6..]
+            v = &v[SIZE..]
         }
 
-        Ok(CompactPeer(list))
+        Ok(CompactPeerV4(list))
     }
 
     fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(CompactPeer(vec![]))
+        Ok(CompactPeerV4(vec![]))
     }
 }
 
-impl<'de> de::Deserialize<'de> for CompactPeer {
+impl<'de> de::Deserialize<'de> for CompactPeerV4 {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -277,7 +279,7 @@ impl<'de> de::Deserialize<'de> for CompactPeer {
     }
 }
 
-impl ser::Serialize for CompactPeer {
+impl ser::Serialize for CompactPeerV4 {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -417,7 +419,7 @@ impl<'de> de::Visitor<'de> for CompactNodesV4Visitor {
     {
         const SIZE: usize = 20 + 4 + 2;
         let mut list: Vec<SocketAddrWithId> = vec![];
-        while !v.is_empty() {
+        while v.len() >= SIZE {
             let info = SocketAddrWithId::from_bytes(&v[..SIZE])
                 .map_err(|e| de::Error::custom(format!("{e}")))?;
             v = &v[SIZE..];
