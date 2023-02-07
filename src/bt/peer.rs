@@ -3,7 +3,7 @@ use crate::bt::{
     Error, Result,
 };
 use crate::torrent::HashId;
-use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},
     TcpStream,
@@ -17,7 +17,7 @@ pub struct PeerState {
     pub broken: Option<String>,
     pub choke: bool,
     pub interested: bool,
-    pub owned_piece_indices: BTreeSet<usize>,
+    pub owned_pieces: bit_vec::BitVec,
     pub available_fragment_req: usize,
 }
 
@@ -27,7 +27,7 @@ impl Default for PeerState {
             choke: true,
             broken: None,
             interested: false,
-            owned_piece_indices: Default::default(),
+            owned_pieces: Default::default(),
             available_fragment_req: 30,
         }
     }

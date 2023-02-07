@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use crate::bt::types::PieceInfo;
 use crate::torrent::HashId;
 use crate::Result;
@@ -9,6 +11,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::peer::Peer;
+
+const MAX_FRAGMENT_LENGTH: usize = 16 << 10;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub enum PieceState {
@@ -24,7 +28,6 @@ pub struct Piece {
     buf: Vec<u8>,
     bv: bit_vec::BitVec,
     weight: i32,
-    piece_len: usize,
     last_new_data_at: Instant,
     last_req_at: Instant,
     index: usize,
@@ -35,9 +38,9 @@ impl Debug for Piece {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Piece")
             .field("state", &self.state)
-            .field("len", &self.piece_len)
+            .field("len", &self.bv.len())
             .field("index", &self.index)
-            .field("done", &self.is_all_done())
+            .field("done", &self.is_all_received())
             .field("percent", &self.percent())
             .finish()
     }
@@ -50,7 +53,6 @@ impl Piece {
             buf: vec![],
             bv: bit_vec::BitVec::from_elem(piece_len, false),
             weight: 0,
-            piece_len,
             last_new_data_at: Instant::now(),
             last_req_at: Instant::now(),
             index,
@@ -120,17 +122,24 @@ impl Piece {
         matches!(self.state, PieceState::Verified)
     }
 
-    pub fn is_all_done(&self) -> bool {
+    pub fn is_all_received(&self) -> bool {
         self.bv.all()
     }
 
     pub fn on_data(&mut self, begin: usize, data: &[u8]) -> Result<()> {
-        let begin = begin;
-        let end = begin + data.len();
-
-        if end > self.bv.len() {
-            todo!("exceed piece length: {}, actually: {}", self.bv.len(), end);
-        }
+        let end = {
+            let tmp_end = begin + data.len();
+            if tmp_end > self.bv.len() {
+                debug!(
+                    "exceed piece length: {}, actually: {}",
+                    self.bv.len(),
+                    tmp_end
+                );
+                self.bv.len()
+            } else {
+                tmp_end
+            }
+        };
 
         if self.buf.len() < end {
             self.buf.resize(end, 0);
@@ -163,24 +172,21 @@ impl Piece {
         }
     }
 
-    pub fn fragments(&self) -> Vec<PieceFragment> {
-        static MAX_FRAGMENT_LENGTH: usize = 16 << 10;
-
+    fn compute_fragments(&self, f: impl Fn(usize, usize) -> bool) -> Vec<PieceFragment> {
         let mut res = vec![];
         let mut i = 0;
-        while i < self.piece_len {
-            if self.bv[i] {
+        while i < self.bv.len() {
+            if !f(i, 1) {
                 i += 1;
                 continue;
             }
             let mut j = i;
-            while j < self.piece_len && !self.bv[j] && (j - i) < MAX_FRAGMENT_LENGTH {
+            while j < self.bv.len() && f(j, j - i + 1) {
                 j += 1;
             }
             res.push((i, j - i));
             i = j;
         }
-
         res.into_iter()
             .map(|(begin, len)| PieceFragment {
                 index: self.get_index(),
@@ -189,6 +195,15 @@ impl Piece {
                 len,
             })
             .collect()
+    }
+
+    pub fn finished_fragments(&self, req_begin: usize, req_len: usize) -> Vec<PieceFragment> {
+        let req_len = cmp::min(req_len, MAX_FRAGMENT_LENGTH);
+        self.compute_fragments(|begin, len| begin >= req_begin && len <= req_len && self.bv[begin])
+    }
+
+    pub fn pending_fragments(&self) -> Vec<PieceFragment> {
+        self.compute_fragments(|begin, len| !self.bv[begin] && len < MAX_FRAGMENT_LENGTH)
     }
 
     pub fn size(&self) -> usize {
@@ -245,5 +260,43 @@ impl PieceFragment {
     }
     pub fn get_weight(&self) -> i32 {
         self.weight
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_compute_fragments() {
+        let mut piece = Piece::new(0, 10); // [0 0 0 0 0 0 0 0 0 0]
+
+        assert_eq!(piece.compute_fragments(|i, _| !piece.bv[i]).len(), 1);
+
+        piece.on_data(0, &[1]).unwrap(); // [1 0 0 0 0 0 0 0 0 0]
+
+        assert_eq!(piece.compute_fragments(|i, _| !piece.bv[i]).len(), 1);
+
+        piece.on_data(4, &[0]).unwrap(); // [1 0 0 0 1 0 0 0 0 0]
+
+        assert_eq!(piece.compute_fragments(|i, _| !piece.bv[i]).len(), 2);
+
+        assert_eq!(piece.compute_fragments(|i, _| piece.bv[i]).len(), 2);
+
+        assert_eq!(
+            piece
+                .compute_fragments(|i, len| !piece.bv[i] && len == 1)
+                .len(),
+            8
+        );
+        assert_eq!(
+            piece
+                .compute_fragments(|i, len| !piece.bv[i] && len <= 4)
+                .len(),
+            3
+        );
+
+        piece.on_data(5, &[0]).unwrap(); // [1 0 0 0 1 1 0 0 0 0]
+
+        assert_eq!(piece.compute_fragments(|i, _| piece.bv[i]).len(), 2);
     }
 }
