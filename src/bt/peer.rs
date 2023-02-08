@@ -4,11 +4,14 @@ use crate::bt::{
 };
 use crate::torrent::HashId;
 use std::{net::SocketAddr, sync::Arc};
-use tokio::net::{
-    tcp::{OwnedReadHalf, OwnedWriteHalf},
-    TcpStream,
-};
 use tokio::{io::AsyncWriteExt, sync::mpsc, sync::RwLock};
+use tokio::{
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpStream,
+    },
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
@@ -53,6 +56,7 @@ pub struct Peer {
     pub addr: Arc<SocketAddr>,
     pub peer_id: Arc<HashId>,
     pub handshake: Arc<BTHandshake>,
+    tasks: Arc<RwLock<JoinSet<()>>>,
 }
 
 impl std::fmt::Debug for Peer {
@@ -83,15 +87,13 @@ impl Peer {
             addr: Arc::new(addr),
             peer_id: handshake.peer_id.into(),
             handshake: Arc::new(handshake),
+            tasks: Default::default(),
         };
 
         {
-            let peer_clone = peer.clone();
-            tokio::spawn(peer_clone.read_tcp(tcp_rx));
-        }
-        {
-            let peer_clone = peer.clone();
-            tokio::spawn(peer_clone.write_tcp(tcp_tx, msg_tcp_rx));
+            let mut task = peer.tasks.write().await;
+            task.spawn(peer.clone().read_tcp(tcp_rx));
+            tokio::spawn(peer.clone().write_tcp(tcp_tx, msg_tcp_rx));
         }
 
         Ok((peer, msg_rx))
@@ -99,6 +101,8 @@ impl Peer {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.cancel.cancel();
+        let mut tasks = self.tasks.write().await;
+        while tasks.join_next().await.is_some() {}
         Ok(())
     }
 

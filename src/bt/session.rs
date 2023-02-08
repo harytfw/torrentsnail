@@ -16,6 +16,7 @@ use std::sync::{Arc, Weak};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use torrent::{HashId, TorrentInfo};
 use tracing::{debug, error, warn};
@@ -46,43 +47,34 @@ pub struct TorrentSession {
     file_maps: Arc<RwLock<Vec<FilePieceMap>>>,
     peer_conn_req_tx: mpsc::Sender<SocketAddr>,
     peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
+    long_term_tasks: Arc<RwLock<JoinSet<()>>>,
+    short_term_tasks: Arc<RwLock<JoinSet<()>>>,
 }
 
 impl TorrentSession {
-    pub fn from_torrent(bt_weak: Weak<BT>, torrent: TorrentFile) -> Result<Self> {
-        let bt_arc = bt_weak.upgrade().unwrap();
-        let info_hash = Arc::new(torrent.info_hash().unwrap());
-        let pieces = Piece::from_length(torrent.info.total_length(), torrent.info.piece_length);
-        let handshake_template = Self::build_handshake(&bt_arc.my_id, &info_hash);
-        let files = build_file_piece_map(&torrent.info);
-        debug!(?info_hash, "new torrent session from info");
-
-        let (peer_conn_req_tx, peer_addr_rx) = mpsc::channel(10);
-        let (peer_piece_req_tx, peer_piece_req_rx) = mpsc::channel(50);
-        let s = Self {
-            bt_weak,
-            peers: Arc::new(RwLock::new(vec![])),
-            pieces: Arc::new(RwLock::new(pieces)),
-            info_hash: Arc::clone(&info_hash),
-            cancel: CancellationToken::new(),
-            state: Default::default(),
-            torrent_metadata_pieces: Arc::new(RwLock::new(vec![])),
-            handshake_template: Arc::new(handshake_template),
-            file_maps: Arc::new(RwLock::new(files)),
-            torrent: Arc::new(RwLock::new(Some(torrent))),
-            peer_conn_req_tx,
-            peer_piece_req_tx,
-        };
-        s.start_tick(peer_addr_rx, peer_piece_req_rx);
-        Ok(s)
+    pub async fn from_torrent(bt: Weak<BT>, torrent: TorrentFile) -> Result<Self> {
+        Self::build(bt, torrent.info_hash().unwrap(), Some(torrent)).await
     }
 
-    pub fn from_info_hash(bt: Weak<BT>, info_hash: HashId) -> Result<Self> {
+    pub async fn from_info_hash(bt: Weak<BT>, info_hash: HashId) -> Result<Self> {
+        Self::build(bt, info_hash, None).await
+    }
+
+    async fn build(bt: Weak<BT>, info_hash: HashId, torrent: Option<TorrentFile>) -> Result<Self> {
         let bt_arc = bt.upgrade().unwrap();
 
         let info_hash = Arc::new(info_hash);
-
         let handshake_template = Self::build_handshake(&bt_arc.my_id, &info_hash);
+
+        let pieces: Vec<Piece>;
+        let files: Vec<FilePieceMap>;
+        if let Some(torrent) = torrent.as_ref() {
+            pieces = Piece::from_length(torrent.info.total_length(), torrent.info.piece_length);
+            files = build_file_piece_map(&torrent.info);
+        } else {
+            pieces = vec![];
+            files = vec![];
+        }
 
         debug!(?info_hash, "new torrent session from info hash");
 
@@ -92,18 +84,20 @@ impl TorrentSession {
         let s = Self {
             bt_weak: bt,
             peers: Arc::new(RwLock::new(vec![])),
-            pieces: Arc::new(RwLock::new(vec![])),
+            pieces: Arc::new(RwLock::new(pieces)),
             info_hash: Arc::clone(&info_hash),
             cancel: CancellationToken::new(),
             state: Default::default(),
             torrent_metadata_pieces: Arc::new(RwLock::new(vec![])),
             handshake_template: Arc::new(handshake_template),
-            file_maps: Default::default(),
-            torrent: Arc::new(RwLock::new(None)),
+            file_maps: Arc::new(RwLock::new(files)),
+            torrent: Arc::new(RwLock::new(torrent)),
             peer_conn_req_tx,
             peer_piece_req_tx,
+            long_term_tasks: Arc::new(RwLock::new(JoinSet::new())),
+            short_term_tasks: Default::default(),
         };
-        s.start_tick(peer_addr_rx, peer_piece_req_rx);
+        s.start_tick(peer_addr_rx, peer_piece_req_rx).await;
         Ok(s)
     }
 
@@ -122,7 +116,7 @@ impl TorrentSession {
         Ok(peer)
     }
 
-    pub async fn active_handshake(&self, mut tcp: TcpStream) -> Result<Peer> {
+    async fn active_handshake(&self, mut tcp: TcpStream) -> Result<Peer> {
         tcp.write_all(&self.handshake_template.to_bytes()).await?;
 
         let peer_handshake = BTHandshake::from_reader_async(&mut tcp).await?;
@@ -143,15 +137,17 @@ impl TorrentSession {
         Ok(peer)
     }
 
-    fn start_tick(
+    async fn start_tick(
         &self,
         peer_addr_rx: mpsc::Receiver<SocketAddr>,
         peer_req_rx: mpsc::Receiver<(Peer, PieceInfo)>,
     ) {
-        tokio::spawn(self.clone().tick_announce());
-        tokio::spawn(self.clone().tick_check_peer());
-        tokio::spawn(self.clone().tick_peer_req(peer_req_rx));
-        tokio::spawn(self.clone().tick_connect_peer(peer_addr_rx));
+        let mut long_term = self.long_term_tasks.write().await;
+        long_term.spawn(self.clone().tick_announce());
+        long_term.spawn(self.clone().tick_check_peer());
+        long_term.spawn(self.clone().tick_peer_req(peer_req_rx));
+        long_term.spawn(self.clone().tick_connect_peer(peer_addr_rx));
+        long_term.spawn(self.clone().tick_consume_short_term());
     }
 
     fn bt(&self) -> Arc<BT> {
@@ -212,12 +208,14 @@ impl TorrentSession {
             return Err(Error::Generic("duplicate peer".into()));
         }
         peers.push(peer.clone());
-        tokio::spawn(self.clone().tick_peer_message(peer.clone(), msg_rx));
+        let mut short_term = self.short_term_tasks.write().await;
+        short_term.spawn(self.clone().tick_peer_message(peer.clone(), msg_rx));
         Ok(peer)
     }
 
     async fn announce_tracker_event(&self, event: tracker::Event) -> Result<()> {
-        tokio::spawn(self.clone().announce_tracker_event_inner(event));
+        let mut short_term = self.short_term_tasks.write().await;
+        short_term.spawn(self.clone().announce_tracker_event_inner(event));
         Ok(())
     }
 
@@ -679,9 +677,10 @@ impl TorrentSession {
                     let mut peers = self.peers.write().await;
                     peers.retain(|p| !broken_addr.contains(&p.addr))
                 }
+                let mut short_term = self.short_term_tasks.write().await;
                 for (peer, err) in broken_peers {
                     debug!(peer = ?peer.addr, err= ?err, "remove broken peer");
-                    tokio::spawn(async move {
+                    short_term.spawn(async move {
                         match peer.shutdown().await {
                             Ok(()) => {}
                             Err(err) => {
@@ -790,6 +789,39 @@ impl TorrentSession {
         }
     }
 
+    async fn tick_consume_short_term(self) {
+        use tokio::time::sleep;
+        use tokio::time::Duration;
+        'next_round: loop {
+            // wait 5s or it was cancelled
+            tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    return
+                }
+                _ = sleep(Duration::from_secs(5)) => {}
+            }
+            let mut short_term = self.short_term_tasks.write().await;
+            loop {
+                tokio::select! {
+                    _ = self.cancel.cancelled() => {
+                        return
+                    }
+                    r = short_term.join_next() => {
+                        if r.is_none() {
+                            // no tasks
+                            continue 'next_round;
+                        }
+                        // one task is complete
+                    },
+                    else => {
+                        // task is incomplete, wait next round
+                        continue 'next_round;
+                    }
+                }
+            }
+        }
+    }
+
     fn support_ut_metadata(&self, peer: &Peer) -> bool {
         match (
             &self.handshake_template.ext_handshake,
@@ -834,6 +866,14 @@ impl TorrentSession {
     pub async fn shutdown(&self) -> Result<()> {
         self.stop().await?;
         self.cancel.cancel();
+        {
+            let mut short_term = self.short_term_tasks.write().await;
+            while short_term.join_next().await.is_some() {}
+        }
+        {
+            let mut long_term = self.long_term_tasks.write().await;
+            while long_term.join_next().await.is_some() {}
+        }
         Ok(())
     }
 }

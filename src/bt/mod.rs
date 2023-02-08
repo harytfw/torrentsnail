@@ -80,7 +80,7 @@ impl BT {
                 return Ok(s.clone());
             }
         }
-        let s = TorrentSession::from_torrent(Arc::downgrade(self), torrent)?;
+        let s = TorrentSession::from_torrent(Arc::downgrade(self), torrent).await?;
         sessions.push(s.clone());
         Ok(s)
     }
@@ -95,7 +95,7 @@ impl BT {
                 return Ok(s.clone());
             }
         }
-        let s = TorrentSession::from_info_hash(Arc::downgrade(self), *info_hash)?;
+        let s = TorrentSession::from_info_hash(Arc::downgrade(self), *info_hash).await?;
         sessions.push(s.clone());
         Ok(s)
     }
