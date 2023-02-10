@@ -392,7 +392,12 @@ impl TorrentSession {
 
         let complete_piece = {
             let mut log_man = self.piece_log_man.write().await;
-            log_man.on_piece_data(data.index, data.begin, &data.fragment)
+            log_man.on_piece_data(
+                data.index,
+                data.begin,
+                &data.fragment,
+                Arc::clone(&peer.peer_id),
+            )
         };
 
         if let Some(piece) = complete_piece {
@@ -401,15 +406,6 @@ impl TorrentSession {
             let checked = pm.check_sha1(index, &sha1)?;
             all_checked = pm.all_checked();
             if checked {
-                let not_checked_num = (0..pm.piece_num())
-                    .map(|i| pm.is_checked(i))
-                    .filter(|b| !b)
-                    .count();
-                let checked_num = (0..pm.piece_num())
-                    .map(|i| pm.is_checked(i))
-                    .filter(|b| *b)
-                    .count();
-                debug!(index, all_checked, not_checked_num, checked_num);
                 peer.send_message_now(BTMessage::Have(index as u32)).await?;
             }
             if all_checked {
@@ -489,7 +485,12 @@ impl TorrentSession {
                 let piece = {
                     let mut log_man = self.metadata_log_man.write().await;
                     log_man
-                        .on_piece_data(piece_data.piece, 0, &piece_data.payload)
+                        .on_piece_data(
+                            piece_data.piece,
+                            0,
+                            &piece_data.payload,
+                            Arc::clone(&peer.peer_id),
+                        )
                         .unwrap()
                 };
                 let index = piece.index();
@@ -583,9 +584,7 @@ impl TorrentSession {
 
         let piece_info = {
             let mut metadata_log_man = self.metadata_log_man.write().await;
-            if metadata_log_man.should_sync() {
-                metadata_log_man.sync(&mut metadata_pm)?;
-            }
+            metadata_log_man.sync(&mut metadata_pm)?;
             metadata_log_man.pull(Arc::clone(&peer.peer_id))
         };
 
@@ -620,6 +619,7 @@ impl TorrentSession {
             let mut log_man = self.piece_log_man.write().await;
             log_man.pull(Arc::clone(&peer.peer_id))
         };
+        debug!(len = ?pending_piece_info.len(), "pending piece");
 
         if state.choke {
             if !pending_piece_info.is_empty() {
@@ -647,10 +647,8 @@ impl TorrentSession {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 {
                     let mut log_man = self.piece_log_man.write().await;
-                    if log_man.should_sync() {
-                        let mut pm = self.piece_manager.lock().await;
-                        log_man.sync(&mut pm)?;
-                    }
+                    let mut pm = self.piece_manager.lock().await;
+                    log_man.sync(&mut pm)?;
                 }
                 let mut broken_peers = vec![];
                 let peers = { self.peers.read().await.clone() };

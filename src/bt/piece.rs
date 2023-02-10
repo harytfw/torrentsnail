@@ -2,6 +2,7 @@ use crate::bt::types::PieceInfo;
 use crate::torrent::{HashId, TorrentInfo};
 use crate::{Error, Result};
 use bit_vec::BitVec;
+use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::os::unix::prelude::FileExt;
@@ -553,6 +554,16 @@ struct PieceLog {
     buf: Vec<u8>,
 }
 
+impl Debug for PieceLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PieceLog")
+            .field("index", &self.index)
+            .field("peer", &self.peer)
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PieceLog {
     fn new(index: usize, piece_len: usize) -> Self {
         Self {
@@ -565,30 +576,55 @@ impl PieceLog {
     }
 }
 
+fn shuffle_slice<T>(mut slice: &mut [T]) {
+    let mut rng = rand::thread_rng();
+    while !slice.is_empty() {
+        let n: usize = rng.gen_range(0..slice.len());
+        slice.swap(0, n);
+        slice = &mut slice[1..];
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeedRecord {
+    max_req_bytes: usize,
+    req_bytes: usize,
+}
+
+impl Default for SpeedRecord {
+    fn default() -> Self {
+        Self {
+            max_req_bytes: 100 << 10,
+            req_bytes: 0,
+        }
+    }
+}
+
 pub struct PieceLogManager {
     max_req: usize,
-    max_req_per_peer: usize,
     logs: HashMap<usize, PieceLog>,
     all_checked: bool,
+    fragment_len: usize,
+    adaptive_speed: HashMap<Arc<HashId>, SpeedRecord>,
+    sync_adaptive_at: Instant,
 }
 
 impl PieceLogManager {
     pub fn new() -> Self {
         Self {
             max_req: 100,
-            max_req_per_peer: 20,
             logs: HashMap::new(),
             all_checked: false,
+            fragment_len: 16 << 10,
+            adaptive_speed: HashMap::default(),
+            sync_adaptive_at: Instant::now(),
         }
     }
 
     pub fn clear(&mut self) {
         self.logs.clear();
+        self.adaptive_speed.clear();
         self.all_checked = false;
-    }
-
-    pub fn should_sync(&self) -> bool {
-        !self.all_checked && self.logs.len() < self.max_req
     }
 
     pub fn sync(&mut self, pm: &mut PieceManager) -> Result<()> {
@@ -599,21 +635,50 @@ impl PieceLogManager {
             return Ok(());
         }
 
-        for index in 0..pm.piece_num() {
-            if pm.is_checked(index) {
-                self.logs.remove(&index);
-                continue;
+        for i in 0..pm.piece_num() {
+            if pm.is_checked(i) {
+                self.logs.remove(&i);
             }
-            if self.logs.contains_key(&index) {
-                continue;
-            }
-            if self.logs.len() > self.max_req {
-                break;
-            }
+        }
+
+        let remain_req = self.max_req.saturating_sub(self.logs.len());
+
+        let t0 = Instant::now();
+        let candidate_indices: Vec<usize> = {
+            let mut list: Vec<usize> = (0..pm.piece_num())
+                .filter(|&i| !pm.is_checked(i) && !self.logs.contains_key(&i))
+                .collect();
+            shuffle_slice(&mut list);
+            list.truncate(remain_req);
+            list
+        };
+
+        for index in candidate_indices {
             self.logs
                 .insert(index, PieceLog::new(index, pm.piece_len(index)));
         }
+
+        self.sync_adaptive_max_req();
+
         Ok(())
+    }
+
+    fn sync_adaptive_max_req(&mut self) {
+        const STEP: usize = 128 << 10;
+        if self.sync_adaptive_at.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.sync_adaptive_at = Instant::now();
+
+        for (k, v) in self.adaptive_speed.iter_mut() {
+            if v.req_bytes == 0 {
+                v.max_req_bytes += STEP;
+            }
+            if v.req_bytes >= v.max_req_bytes {
+                v.max_req_bytes.checked_sub(STEP).unwrap_or(STEP);
+            }
+            debug!(?k, ?v);
+        }
     }
 
     pub fn pull(&mut self, peer_id: Arc<HashId>) -> Vec<PieceInfo> {
@@ -622,35 +687,42 @@ impl PieceLogManager {
         }
 
         let mut ret = vec![];
-        let mut peer_req_cnt = 0;
+
+        let req_record = self
+            .adaptive_speed
+            .entry(Arc::clone(&peer_id))
+            .or_insert_with(Default::default);
+
         for log in self.logs.values_mut() {
-            let not_take_piece =
-                matches!(log.peer, Some((_, at)) if at.elapsed() < Duration::from_secs(15));
-            if !not_take_piece {
-                log.peer = Some((Arc::clone(&peer_id), Instant::now()));
-                ret.push(PieceInfo::new(
-                    log.index,
-                    log.offset,
-                    cmp::min(log.bits.len() - log.offset, 16 << 10),
-                ));
-            }
-
-            match log.peer.as_ref() {
-                Some((log_peer_id, _)) if log_peer_id == &peer_id => peer_req_cnt += 1,
-                _ => {}
-            }
-
-            if peer_req_cnt > self.max_req_per_peer {
+            if req_record.req_bytes > req_record.max_req_bytes {
                 break;
+            }
+
+            let skip = matches!(log.peer, Some((_, at)) if at.elapsed() < Duration::from_secs(15));
+            if !skip {
+                log.peer = Some((Arc::clone(&peer_id), Instant::now()));
+                let len = cmp::min(log.bits.len() - log.offset, self.fragment_len);
+                ret.push(PieceInfo::new(log.index, log.offset, len));
+                req_record.req_bytes += len
             }
         }
 
         ret
     }
 
-    pub fn on_piece_data(&mut self, index: usize, begin: usize, buf: &[u8]) -> Option<Piece> {
+    pub fn on_piece_data(
+        &mut self,
+        index: usize,
+        begin: usize,
+        buf: &[u8],
+        peer_id: Arc<HashId>,
+    ) -> Option<Piece> {
         if self.all_checked {
             return None;
+        }
+
+        if let Some(record) = self.adaptive_speed.get_mut(&peer_id) {
+            record.req_bytes = record.req_bytes.saturating_sub(buf.len());
         }
 
         let complete = if let Some(log) = self.logs.get_mut(&index) {
@@ -673,8 +745,9 @@ impl PieceLogManager {
             false
         };
         if complete {
-            let log = self.logs.remove(&index).unwrap();
-            let piece = Piece::from_buf(log.index, log.buf);
+            debug!(?index, "complete piece");
+            let log = self.logs.get(&index).unwrap();
+            let piece = Piece::from_buf(log.index, log.buf.to_vec());
             Some(piece)
         } else {
             None
@@ -693,6 +766,13 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::*;
+
+    #[test]
+    fn test_shuffle() {
+        let mut a = [0, 1, 2, 3];
+        shuffle_slice(&mut a);
+        println!("{a:?}");
+    }
 
     #[test]
     fn test_piece() {
@@ -819,8 +899,6 @@ mod tests {
         let pieces: Vec<Piece> = (0..pm.piece_num()).map(|i| pm.read(i).unwrap()).collect();
         pm.clear_all_checked_bits()?;
 
-        assert!(plm.should_sync());
-
         plm.sync(&mut pm)?;
 
         assert!(!plm.pull(peer_id.clone()).is_empty());
@@ -832,7 +910,9 @@ mod tests {
         assert!(!plm.pull(peer_id.clone()).is_empty());
 
         for piece in pieces {
-            let ret_piece = plm.on_piece_data(piece.index, 0, piece.buf()).unwrap();
+            let ret_piece = plm
+                .on_piece_data(piece.index, 0, piece.buf(), Arc::clone(&peer_id))
+                .unwrap();
             pm.write(ret_piece)?;
             assert!(pm.check_sha1(piece.index, torrent.info.get_piece_sha1(piece.index))?);
         }
