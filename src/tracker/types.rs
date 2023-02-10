@@ -614,7 +614,7 @@ impl ScrapeRequest {
         buf.write_u32::<BigEndian>(self.transaction_id)?;
 
         for hash in self.hash_info.iter() {
-            buf.extend(hash.as_slice());
+            buf.extend(hash.iter());
         }
 
         Ok(buf)

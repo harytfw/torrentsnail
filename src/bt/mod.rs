@@ -214,7 +214,7 @@ impl BT {
         Ok(id.into())
     }
 
-    pub async fn shutdown(self: Arc<Self>) -> Result<()> {
+    pub async fn shutdown(self: &Arc<Self>) -> Result<()> {
         self.cancel.cancel();
         async {
             self.dht.shutdown().await?;

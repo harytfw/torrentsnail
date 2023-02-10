@@ -317,7 +317,7 @@ impl SocketAddrWithId {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![];
-        buf.extend(*self.id);
+        buf.extend(self.id.iter());
         buf.extend(self.addr.to_bytes());
         buf
     }
@@ -344,7 +344,7 @@ impl Serialize for SocketAddrWithId {
         S: serde::Serializer,
     {
         serializer.serialize_bytes(
-            [self.id.as_slice(), self.addr.to_bytes().as_slice()]
+            [&self.id, self.addr.to_bytes().as_slice()]
                 .concat()
                 .as_slice(),
         )

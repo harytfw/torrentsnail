@@ -403,7 +403,7 @@ impl TorrentSession {
         if let Some(piece) = complete_piece {
             let mut pm = self.piece_manager.lock().await;
             pm.write(piece)?;
-            let checked = pm.check_sha1(index, &sha1)?;
+            let checked = pm.check(index, &sha1)?;
             all_checked = pm.all_checked();
             if checked {
                 peer.send_message_now(BTMessage::Have(index as u32)).await?;
@@ -498,7 +498,7 @@ impl TorrentSession {
                 let mut metadata_pm = self.metadata_pm.lock().await;
                 // TODO: handle error
                 metadata_pm.write(piece)?;
-                let checked = metadata_pm.check_sha1(index, &sha1)?;
+                let checked = metadata_pm.check(index, &sha1)?;
                 debug!(index, checked);
                 if metadata_pm.all_checked() {
                     {
@@ -516,6 +516,7 @@ impl TorrentSession {
         }
 
         if let Some(metadata_buf) = torrent_metadata_buf {
+            // FIXME: support sha256
             let computed_info_hash = {
                 HashId::try_from(
                     ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &metadata_buf)

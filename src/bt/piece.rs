@@ -42,6 +42,12 @@ impl Piece {
         result
     }
 
+    pub fn sha256(&self) -> [u8; 32] {
+        let info_hash = ring::digest::digest(&ring::digest::SHA256, &self.buf);
+        let result: [u8; 32] = info_hash.as_ref().try_into().unwrap();
+        result
+    }
+
     pub fn buf(&self) -> &[u8] {
         &self.buf
     }
@@ -131,6 +137,7 @@ struct FilePieceMap {
     fragments: Vec<FileFragment>,
     path: PathBuf,
     size: usize,
+    // TODO: use rang to represent used range
     piece_indices: HashSet<usize>,
 }
 
@@ -448,12 +455,13 @@ impl PieceManager {
         self.checked_bits[index]
     }
 
-    pub fn check_sha1(&mut self, index: usize, sha1: &[u8]) -> Result<bool> {
-        if index >= self.piece_num {
-            return Ok(false);
-        }
+    pub fn check(&mut self, index: usize, checksum: &[u8]) -> Result<bool> {
         let piece = self.fetch(index)?;
-        let b = piece.sha1() == sha1;
+        let b = match checksum.len() {
+            20 => piece.sha1() == checksum,
+            32 => piece.sha256() == checksum,
+            size => return Err(Error::BadChecksumSize(size)),
+        };
         self.checked_bits.set(index, b);
         Ok(b)
     }
@@ -802,7 +810,7 @@ mod tests {
         let mut pm = PieceManager::empty();
 
         assert!(pm.all_checked());
-        assert!(!pm.check_sha1(0, &[0])?);
+        assert!(!pm.check(0, &[0])?);
         assert!(pm.fetch(0).is_err());
         assert_eq!(pm.piece_num(), 0);
 
@@ -864,7 +872,7 @@ mod tests {
         }
 
         for i in 0..pm.piece_num() {
-            assert!(pm.check_sha1(i, sha1_fn(i))?);
+            assert!(pm.check(i, sha1_fn(i))?);
         }
 
         {
@@ -872,9 +880,9 @@ mod tests {
             let mut piece = origin_piece.clone();
             piece.buf[0..100].copy_from_slice(&[1; 100]);
             pm.write(piece)?;
-            assert!(!pm.check_sha1(0, sha1_fn(0))?);
+            assert!(!pm.check(0, sha1_fn(0))?);
             pm.write(origin_piece)?;
-            assert!(pm.check_sha1(0, sha1_fn(0))?);
+            assert!(pm.check(0, sha1_fn(0))?);
         }
 
         Ok(())
@@ -890,7 +898,7 @@ mod tests {
 
     #[test]
     fn piece_log_man() -> Result<()> {
-        let peer_id = Arc::new(HashId::zero());
+        let peer_id = Arc::new(HashId::ZERO_V1);
 
         let mut plm = PieceLogManager::new();
         plm.clear();
@@ -914,7 +922,7 @@ mod tests {
                 .on_piece_data(piece.index, 0, piece.buf(), Arc::clone(&peer_id))
                 .unwrap();
             pm.write(ret_piece)?;
-            assert!(pm.check_sha1(piece.index, torrent.info.get_piece_sha1(piece.index))?);
+            assert!(pm.check(piece.index, torrent.info.get_piece_sha1(piece.index))?);
         }
 
         Ok(())

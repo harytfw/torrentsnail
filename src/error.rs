@@ -53,7 +53,9 @@ pub enum Error {
     #[error("handshake: {0}")]
     Handshake(String),
     #[error("piece {0} not found")]
-    PieceNotFound(usize)
+    PieceNotFound(usize),
+    #[error("bad checksum size: {0}")]
+    BadChecksumSize(usize)
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

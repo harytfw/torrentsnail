@@ -73,6 +73,7 @@ impl TorrentInfo {
     }
 
     pub fn info_hash(&self) -> Result<HashId> {
+        // FIXME: support bit torrent v2
         let buf = to_bytes(&self)?;
         let info_hash = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &buf);
         let hash = info_hash
@@ -187,6 +188,7 @@ impl TorrentFile {
     }
 
     pub fn info_hash(&self) -> Option<HashId> {
+        // FIXME: support bit torrent v2
         self.origin_content
             .as_ref()
             .and_then(|val| val.as_dict())

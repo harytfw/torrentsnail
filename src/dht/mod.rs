@@ -213,7 +213,7 @@ impl DHTInner {
     fn new(my_id: Arc<HashId>, sock: Arc<UdpSocket>) -> Self {
         Self {
             my_id: Arc::clone(&my_id),
-            buckets: vec![Bucket::new(HashId::zero())],
+            buckets: vec![Bucket::new(HashId::ZERO_V1)],
             peer_storage: Default::default(),
             last_new_node_at: SystemTime::UNIX_EPOCH,
             token_manager: TokenManager::new(),

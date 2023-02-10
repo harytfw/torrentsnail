@@ -151,7 +151,7 @@ mod test {
     #[test]
     fn test_node() {
         let node = Node::new(
-            HashId::zero(),
+            HashId::ZERO_V1,
             "127.0.0.1:1800".parse::<SocketAddrV4>().unwrap().into(),
         );
 

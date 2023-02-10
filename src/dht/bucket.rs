@@ -168,7 +168,7 @@ mod tests {
     fn random_node() -> Node {
         let mut rng = rand::thread_rng();
 
-        let mut id = HashId::zero();
+        let mut id = HashId::ZERO_V1;
         rng.fill(id.as_mut());
 
         let ip: [u8; 4] = rand::random();
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_add_node() {
-        let mut bucket = Bucket::new(HashId::zero());
+        let mut bucket = Bucket::new(HashId::ZERO_V1);
         for _ in 0..100 {
             bucket.add_node(random_node());
         }
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_split() {
-        let mut bucket = Bucket::new(HashId::zero());
+        let mut bucket = Bucket::new(HashId::ZERO_V1);
         let num = 100;
         for _ in 0..num {
             bucket.add_node(random_node());

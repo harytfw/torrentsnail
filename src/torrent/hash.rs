@@ -10,26 +10,46 @@ fn valid_byte(ch: u8) -> bool {
     matches!(ch, b'A'..=b'Z' | b'a' ..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'(' | b')' )
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HashId([u8; 20]);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HashId {
+    V1([u8; 20]),
+    V2([u8; 32]),
+}
+
+impl Default for HashId {
+    fn default() -> Self {
+        Self::ZERO_V1
+    }
+}
 
 impl HashId {
-    pub fn is_zero(&self) -> bool {
-        self == &Self::zero()
-    }
+    pub const ZERO_V1: HashId = Self::V1([0u8; 20]);
+    pub const ZERO_V2: HashId = Self::V2([0u8; 32]);
 
-    pub const fn zero() -> Self {
-        Self([0u8; 20])
+    pub fn is_zero(&self) -> bool {
+        self == &Self::ZERO_V1 || self == &Self::ZERO_V2
     }
 
     pub fn is_same(&self, other: &Self) -> bool {
         self == other
     }
 
+    pub fn is_v1(&self) -> bool {
+        matches!(self, Self::V1(_))
+    }
+
+    pub fn is_v2(&self) -> bool {
+        matches!(self, Self::V2(_))
+    }
+
     pub fn distance(&self, other: &HashId) -> HashId {
-        let mut res = HashId::zero();
+        if self.len() != other.len() {
+            panic!("try to compare v1 with v2");
+        }
+
+        let mut res = *self;
         for i in 0..res.len() {
-            res[i] = self[i] ^ other[i];
+            res[i] ^= other[i];
         }
         res
     }
@@ -44,8 +64,15 @@ impl HashId {
     }
 
     pub fn from_slice(slice: &[u8]) -> Result<Self> {
-        let id: [u8; 20] = slice.try_into().map_err(|_| Error::BytesToHashId)?;
-        Ok(Self(id))
+        if slice.len() == Self::ZERO_V1.len() {
+            let id: [u8; 20] = slice.try_into().map_err(|_| Error::BytesToHashId)?;
+            Ok(Self::V1(id))
+        } else if slice.len() == Self::ZERO_V2.len() {
+            let id: [u8; 32] = slice.try_into().map_err(|_| Error::BytesToHashId)?;
+            Ok(Self::V2(id))
+        } else {
+            Err(Error::BytesToHashId)
+        }
     }
 
     pub fn url_encoded(&self) -> String {
@@ -75,13 +102,25 @@ impl Display for HashId {
 
 impl From<[u8; 20]> for HashId {
     fn from(value: [u8; 20]) -> Self {
-        Self(value)
+        Self::V1(value)
     }
 }
 
 impl From<&[u8; 20]> for HashId {
     fn from(value: &[u8; 20]) -> Self {
-        Self(value.to_owned())
+        Self::V1(value.to_owned())
+    }
+}
+
+impl From<[u8; 32]> for HashId {
+    fn from(value: [u8; 32]) -> Self {
+        Self::V2(value)
+    }
+}
+
+impl From<&[u8; 32]> for HashId {
+    fn from(value: &[u8; 32]) -> Self {
+        Self::V2(value.to_owned())
     }
 }
 
@@ -93,21 +132,27 @@ impl TryFrom<&[u8]> for HashId {
 }
 
 impl ops::Deref for HashId {
-    type Target = [u8; 20];
+    type Target = [u8];
     fn deref(&self) -> &Self::Target {
-        &self.0
+        match self {
+            Self::V1(v1) => v1,
+            Self::V2(v2) => v2,
+        }
     }
 }
 
 impl ops::DerefMut for HashId {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        match self {
+            Self::V1(v1) => v1,
+            Self::V2(v2) => v2,
+        }
     }
 }
 
 impl convert::AsRef<[u8]> for HashId {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        self
     }
 }
 
@@ -120,14 +165,14 @@ impl<'de> de::Deserialize<'de> for HashId {
         impl<'de> de::Visitor<'de> for IdVisitor {
             type Value = HashId;
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(formatter, "Hash Id with 20 bytes")
+                write!(formatter, "Hash Id")
             }
 
             fn visit_bytes<E>(self, v: &[u8]) -> std::result::Result<Self::Value, E>
             where
                 E: de::Error,
             {
-                let id = HashId::try_from(v).map_err(|e| de::Error::custom(e.to_string()))?;
+                let id = HashId::from_slice(v).map_err(|e| de::Error::custom(e.to_string()))?;
                 Ok(id)
             }
 
@@ -155,10 +200,27 @@ impl ser::Serialize for HashId {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    pub fn hash_id() {
+        assert!(HashId::ZERO_V1.is_v1());
+        assert!(HashId::ZERO_V2.is_v2());
+
+        let v1 = HashId::from_hex("08ada5a7a6183aae1e09d831df6748d566095a10").unwrap();
+        let v2 =
+            HashId::from_hex("d66919d15e1d90ead86302c9a1ee9ef73b446be261d65b8d8d78c589ae04cdc0")
+                .unwrap();
+
+        assert!(v1.is_v1());
+        assert!(v2.is_v2());
+
+        assert!(v1.is_same(&v1));
+    }
+
     #[test]
     pub fn url_encoded() {
         {
-            let id = HashId::zero();
+            let id = HashId::ZERO_V1;
             let s = id.url_encoded();
             assert_eq!(s.len(), 60);
         }

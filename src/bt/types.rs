@@ -167,8 +167,8 @@ impl BTHandshake {
             self.p.as_slice(),
             self.protocol.as_slice(),
             self.extension.as_slice(),
-            self.info_hash.as_slice(),
-            self.peer_id.as_slice(),
+            &self.info_hash,
+            &self.peer_id,
         ]
         .concat()
     }

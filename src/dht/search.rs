@@ -236,9 +236,9 @@ mod tests {
 
     #[test]
     fn test_search_session() {
-        let mut ss = SearchSession::new(0, HashId::zero());
+        let mut ss = SearchSession::new(0, HashId::ZERO_V1);
         ss.start();
         ss.stop();
-        ss.reset(HashId::zero());
+        ss.reset(HashId::ZERO_V1);
     }
 }
