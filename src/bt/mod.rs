@@ -8,7 +8,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, span, Instrument, Level};
-pub mod file;
 pub mod peer;
 pub mod session;
 pub mod types;
@@ -21,6 +20,7 @@ use crate::{
 };
 use session::TorrentSession;
 pub mod piece;
+pub const MAX_FRAGMENT_LENGTH: usize = 16 << 10;
 
 #[derive(Clone)]
 pub struct BT {

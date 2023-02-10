@@ -1,6 +1,5 @@
-use crate::bt::file::{build_file_piece_map, FilePieceMap};
 use crate::bt::peer::Peer;
-use crate::bt::piece::{Piece, PieceFragment};
+use crate::bt::piece::{PieceLogManager, PieceManager};
 use crate::bt::types::{
     BTExtMessage, BTHandshake, BTMessage, PieceData, PieceInfo, UTMetadataMessage,
     UTMetadataPieceData,
@@ -9,13 +8,16 @@ use crate::bt::BT;
 use crate::torrent::TorrentFile;
 use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, ToSocketAddrs};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use torrent::{HashId, TorrentInfo};
@@ -24,31 +26,22 @@ use tracing::{debug, error, warn};
 const MSG_UT_METADATA: &str = "ut_metadata";
 const METADATA_PIECE_SIZE: usize = 16384;
 
-#[derive(Debug, Clone)]
-pub struct SessionState {}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {}
-    }
-}
-
 #[derive(Clone)]
 pub struct TorrentSession {
     pub info_hash: Arc<HashId>,
     pub torrent: Arc<RwLock<Option<TorrentFile>>>,
     bt_weak: Weak<BT>,
     peers: Arc<RwLock<Vec<Peer>>>,
-    pieces: Arc<RwLock<Vec<Piece>>>,
-    torrent_metadata_pieces: Arc<RwLock<Vec<Piece>>>,
-    state: Arc<RwLock<SessionState>>,
     handshake_template: Arc<BTHandshake>,
     cancel: CancellationToken,
-    file_maps: Arc<RwLock<Vec<FilePieceMap>>>,
     peer_conn_req_tx: mpsc::Sender<SocketAddr>,
     peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
     long_term_tasks: Arc<RwLock<JoinSet<()>>>,
     short_term_tasks: Arc<RwLock<JoinSet<()>>>,
+    piece_manager: Arc<Mutex<PieceManager>>,
+    metadata_pm: Arc<Mutex<PieceManager>>,
+    piece_log_man: Arc<RwLock<PieceLogManager>>,
+    metadata_log_man: Arc<RwLock<PieceLogManager>>,
 }
 
 impl TorrentSession {
@@ -66,14 +59,21 @@ impl TorrentSession {
         let info_hash = Arc::new(info_hash);
         let handshake_template = Self::build_handshake(&bt_arc.my_id, &info_hash);
 
-        let pieces: Vec<Piece>;
-        let files: Vec<FilePieceMap>;
+        let cache: PieceManager;
+        let metadata_cache: PieceManager;
+        let piece_log_man = PieceLogManager::new();
+        let metadata_log_man = PieceLogManager::new();
         if let Some(torrent) = torrent.as_ref() {
-            pieces = Piece::from_length(torrent.info.total_length(), torrent.info.piece_length);
-            files = build_file_piece_map(&torrent.info);
+            cache = PieceManager::from_torrent_info("/tmp/snail/", &torrent.info)?;
+            let mut tmp_path = PathBuf::from("/tmp/snail/");
+            tmp_path.push(format!("{}.torrent", torrent.info.name));
+            let metadata_buf = bencode::to_bytes(torrent.get_origin_info().unwrap())?;
+            fs::write(&tmp_path, &metadata_buf)?;
+            metadata_cache =
+                PieceManager::from_single_file(&tmp_path, metadata_buf.len(), METADATA_PIECE_SIZE)?;
         } else {
-            pieces = vec![];
-            files = vec![];
+            cache = PieceManager::empty();
+            metadata_cache = PieceManager::empty();
         }
 
         debug!(?info_hash, "new torrent session from info hash");
@@ -84,18 +84,18 @@ impl TorrentSession {
         let s = Self {
             bt_weak: bt,
             peers: Arc::new(RwLock::new(vec![])),
-            pieces: Arc::new(RwLock::new(pieces)),
             info_hash: Arc::clone(&info_hash),
             cancel: CancellationToken::new(),
-            state: Default::default(),
-            torrent_metadata_pieces: Arc::new(RwLock::new(vec![])),
+            metadata_pm: Arc::new(Mutex::new(metadata_cache)),
             handshake_template: Arc::new(handshake_template),
-            file_maps: Arc::new(RwLock::new(files)),
             torrent: Arc::new(RwLock::new(torrent)),
             peer_conn_req_tx,
             peer_piece_req_tx,
             long_term_tasks: Arc::new(RwLock::new(JoinSet::new())),
             short_term_tasks: Default::default(),
+            piece_manager: Arc::new(Mutex::new(cache)),
+            piece_log_man: Arc::new(RwLock::new(piece_log_man)),
+            metadata_log_man: Arc::new(RwLock::new(metadata_log_man)),
         };
         s.start_tick(peer_addr_rx, peer_piece_req_rx).await;
         Ok(s)
@@ -207,6 +207,13 @@ impl TorrentSession {
             peer.shutdown().await?;
             return Err(Error::Generic("duplicate peer".into()));
         }
+        {
+            let pm = self.piece_manager.lock().await;
+            if !pm.checked_bits().is_empty() {
+                peer.send_message_now(BTMessage::BitField(pm.checked_bits().to_bytes()))
+                    .await?;
+            }
+        }
         peers.push(peer.clone());
         let mut short_term = self.short_term_tasks.write().await;
         short_term.spawn(self.clone().tick_peer_message(peer.clone(), msg_rx));
@@ -273,27 +280,6 @@ impl TorrentSession {
         }
     }
 
-    pub async fn get_state(&self) -> SessionState {
-        todo!()
-    }
-
-    async fn pending_fragments(&self, peer: &Peer) -> VecDeque<PieceFragment> {
-        const MAX_FRAGMENTS: usize = 100;
-
-        let pieces = self.pieces.read().await;
-        let mut fragments = vec![];
-        for piece in pieces.iter() {
-            if piece.should_send_req_to_peer(peer) {
-                fragments.append(&mut piece.pending_fragments());
-            }
-            if fragments.len() > MAX_FRAGMENTS {
-                break;
-            }
-        }
-        fragments.sort_by_key(|frag| frag.get_weight());
-        fragments.into_iter().collect()
-    }
-
     async fn tick_announce(self) {
         let t = async {
             loop {
@@ -312,6 +298,7 @@ impl TorrentSession {
                     if exists_peers.contains(&addr) {
                         continue 'inner;
                     }
+                    // TODO: handle io error
                     let tcp = TcpStream::connect(addr).await?;
                     debug!(local_addr =?tcp.local_addr(), peer_addr = ?tcp.peer_addr(), "try active handshake");
                     match self.active_handshake(tcp).await {
@@ -360,14 +347,14 @@ impl TorrentSession {
                     .await?;
             }
             BTMessage::Piece(data) => {
-                self.on_piece_arrive(peer, data).await?;
+                self.on_piece_arrived(peer, data).await?;
             }
             BTMessage::Have(index) => {
                 let index = *index as usize;
                 let mut state = peer.state.write().await;
                 if state.owned_pieces.is_empty() {
-                    let pieces = self.pieces.read().await;
-                    state.owned_pieces = bit_vec::BitVec::from_elem(pieces.len(), false)
+                    let num = self.piece_manager.lock().await.piece_num();
+                    state.owned_pieces = bit_vec::BitVec::from_elem(num, false)
                 }
                 if index < state.owned_pieces.len() {
                     state.owned_pieces.set(index, true);
@@ -391,57 +378,46 @@ impl TorrentSession {
         Ok(())
     }
 
-    async fn on_piece_arrive(&self, peer: &Peer, data: &PieceData) -> Result<(), Error> {
-        let mut done = false;
-        let mut verified = false;
-        let mut all_verified = false;
-        let index = data.index as usize;
-        {
-            let mut pieces = self.pieces.write().await;
-            if let Some(piece) = pieces.get_mut(index) {
-                if piece.is_downloading() {
-                    piece.on_data(data.begin as usize, &data.fragment)?;
-                }
-                done = piece.is_all_received();
-                if done {
-                    let torrent = self.torrent.read().await;
+    async fn on_piece_arrived(&self, peer: &Peer, data: &PieceData) -> Result<(), Error> {
+        let index = data.index;
+        let _begin = data.begin;
 
-                    let expected_sha1 = torrent.as_ref().unwrap().info.get_pieces_sha1(index);
+        let sha1 = {
+            let torrent = self.torrent.read().await;
+            let info = torrent.as_ref().map(|t| &t.info).unwrap();
+            info.get_piece_sha1(index).to_vec()
+        };
 
-                    verified = piece.on_verify_sha1(expected_sha1);
-                }
+        let mut all_checked = false;
+
+        let complete_piece = {
+            let mut log_man = self.piece_log_man.write().await;
+            log_man.on_piece_data(data.index, data.begin, &data.fragment)
+        };
+
+        if let Some(piece) = complete_piece {
+            let mut pm = self.piece_manager.lock().await;
+            pm.write(piece)?;
+            let checked = pm.check_sha1(index, &sha1)?;
+            all_checked = pm.all_checked();
+            if checked {
+                let not_checked_num = (0..pm.piece_num())
+                    .map(|i| pm.is_checked(i))
+                    .filter(|b| !b)
+                    .count();
+                let checked_num = (0..pm.piece_num())
+                    .map(|i| pm.is_checked(i))
+                    .filter(|b| *b)
+                    .count();
+                debug!(index, all_checked, not_checked_num, checked_num);
+                peer.send_message_now(BTMessage::Have(index as u32)).await?;
+            }
+            if all_checked {
+                pm.flush()?;
             }
         }
-        {
-            let mut state = peer.state.write().await;
-            state.available_fragment_req += 1;
-        }
-        if done && verified {
-            debug!(index = ?index, "sha1 verified");
-
-            let pieces = self.pieces.read().await;
-
-            let piece = pieces.get(index).unwrap();
-
-            let file_maps = self.file_maps.read().await;
-            for map in file_maps.iter() {
-                if map.support_piece(piece) {
-                    debug!(?map, "flush to file");
-                    map.accept(&[piece])?;
-                }
-            }
-
-            let pending_cnt = pieces.iter().filter(|p| p.is_pending()).count();
-            let downloading_cnt = pieces.iter().filter(|p| p.is_downloading()).count();
-            let verified_cnt = pieces.iter().filter(|p| p.is_verified()).count();
-            all_verified = pieces.iter().all(Piece::is_verified);
-            debug!(?pending_cnt, ?downloading_cnt, ?verified_cnt);
-        }
-        if done && !verified {
-            warn!(index = ?index, "sha1 not match, this piece will re-download soon");
-        }
-        if all_verified {
-            debug!("all verified");
+        if all_checked {
+            debug!("all checked");
             self.stop().await?;
         }
         Ok(())
@@ -470,25 +446,9 @@ impl TorrentSession {
     async fn handle_ut_metadata_msg(&self, peer: &Peer, msg: &UTMetadataMessage) -> Result<()> {
         debug!(?msg, MSG_UT_METADATA);
 
-        let mut torrent_metadata: Option<TorrentInfo> = None;
+        let mut torrent_metadata_buf: Option<Vec<u8>> = None;
         match msg {
             UTMetadataMessage::Request(index) => {
-                let msg: UTMetadataMessage = {
-                    let index = *index;
-                    let metadata_pieces = self.torrent_metadata_pieces.read().await;
-
-                    if let Some(piece) = metadata_pieces.get(index) {
-                        let total_size = metadata_pieces.iter().map(Piece::size).sum();
-                        UTMetadataMessage::Data(UTMetadataPieceData {
-                            piece: index,
-                            total_size,
-                            payload: piece.get_buf().to_vec(),
-                        })
-                    } else {
-                        UTMetadataMessage::Reject(index)
-                    }
-                };
-
                 let msg_id = self
                     .handshake_template
                     .ext_handshake
@@ -496,173 +456,209 @@ impl TorrentSession {
                     .and_then(|ext| ext.get_msg_id(MSG_UT_METADATA))
                     .unwrap();
 
+                let msg: UTMetadataMessage = {
+                    let index = *index;
+                    let mut metadata_pm = self.metadata_pm.lock().await;
+                    let total_size = metadata_pm.total_size();
+
+                    if metadata_pm.is_checked(index) {
+                        let piece = metadata_pm.read(index)?;
+                        let piece_data = UTMetadataPieceData {
+                            piece: index,
+                            total_size,
+                            payload: piece.into_buf(),
+                        };
+                        UTMetadataMessage::Data(piece_data)
+                    } else {
+                        UTMetadataMessage::Reject(index)
+                    }
+                };
+
                 peer.send_message_now((msg_id, msg)).await?;
             }
 
-            UTMetadataMessage::Reject(index) => {
-                let mut pieces = self.torrent_metadata_pieces.write().await;
-                if let Some(piece) = pieces.get_mut(*index) {
-                    piece.add_band_peer_id(Arc::clone(&peer.peer_id));
-                }
+            UTMetadataMessage::Reject(_index) => {
+                // let mut cache = self.metadata_cache.write().await;
+                // let piece =  cache.fetch(*index).await?;
+                // if !piece.is_all_received() {
+                //     peer.send_message_now((msg_id, msg)).await?;
+                // }
             }
 
             UTMetadataMessage::Data(piece_data) => {
-                let mut metadata_pieces = self.torrent_metadata_pieces.write().await;
-                if let Some(piece) = metadata_pieces.get_mut(piece_data.piece) {
-                    piece.on_data(0, &piece_data.payload)?;
-                }
-                if metadata_pieces.iter().all(Piece::is_all_received) {
-                    let total_size = metadata_pieces.iter().map(Piece::size).sum();
-                    let mut total_buf: Vec<u8> = Vec::with_capacity(total_size);
-                    for piece in metadata_pieces.iter() {
-                        total_buf.extend_from_slice(piece.get_buf())
+                let piece = {
+                    let mut log_man = self.metadata_log_man.write().await;
+                    log_man
+                        .on_piece_data(piece_data.piece, 0, &piece_data.payload)
+                        .unwrap()
+                };
+                let index = piece.index();
+                let sha1 = piece.sha1();
+                let mut metadata_pm = self.metadata_pm.lock().await;
+                // TODO: handle error
+                metadata_pm.write(piece)?;
+                let checked = metadata_pm.check_sha1(index, &sha1)?;
+                debug!(index, checked);
+                if metadata_pm.all_checked() {
+                    {
+                        let mut log_man = self.metadata_log_man.write().await;
+                        log_man.sync(&mut metadata_pm)?;
                     }
-                    torrent_metadata = bencode::from_bytes(&total_buf)?;
+                    let mut buf = Vec::with_capacity(metadata_pm.total_size());
+                    for i in 0..metadata_pm.piece_num() {
+                        let piece = metadata_pm.fetch(i)?;
+                        buf.extend(piece.buf())
+                    }
+                    torrent_metadata_buf = Some(buf);
                 }
             }
         }
 
-        if let Some(metadata) = torrent_metadata {
-            let computed_info_hash = metadata.info_hash()?;
-            debug!(?metadata, "full metadata");
+        if let Some(metadata_buf) = torrent_metadata_buf {
+            let computed_info_hash = {
+                HashId::try_from(
+                    ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &metadata_buf)
+                        .as_ref(),
+                )
+                .unwrap()
+            };
+
             if !self.info_hash.is_same(&computed_info_hash) {
                 debug!("info hash not match");
-                let mut metadata_pieces = self.torrent_metadata_pieces.write().await;
-                metadata_pieces.clear();
+                let mut metadata_pm = self.metadata_pm.lock().await;
+                metadata_pm.clear_all_checked_bits()?;
                 return Ok(());
             }
-            let total_len = metadata.total_length();
-            let piece_len = metadata.piece_length;
-            {
-                debug!("save torrent info");
-                let mut torrent = self.torrent.write().await;
-                *torrent = Some(TorrentFile::from_info(metadata.clone()))
-            }
+
+            let val: bencode::Value = bencode::from_bytes(&metadata_buf)?;
+            let info: TorrentInfo = bencode::from_bytes(&metadata_buf)?;
+
+            // TODO: add atomic bool to prevent session from using partial state
+
+            let total_len = info.total_length();
+            let piece_len = info.piece_length;
             {
                 debug!(?total_len, ?piece_len, "construct pieces");
-                let mut pieces = self.pieces.write().await;
-                *pieces = Piece::from_length(total_len, piece_len);
+                let mut cache = self.piece_manager.lock().await;
+                *cache = PieceManager::from_torrent_info("/tmp/snail/", &info)?;
+
+                let mut log_man = self.piece_log_man.write().await;
+                log_man.sync(&mut cache)?;
             }
             {
-                let file_maps = build_file_piece_map(&metadata);
-                let mut files = self.file_maps.write().await;
-                *files = file_maps
+                debug!("save torrent info");
+                let mut torrent = TorrentFile::from_info(info.clone());
+                torrent.set_origin_info(val);
+                let mut torrent_lock = self.torrent.write().await;
+                *torrent_lock = Some(torrent)
             }
         }
         Ok(())
     }
 
-    async fn handle_req_metadata(&self, peer: &Peer) -> Result<bool> {
+    async fn handle_req_metadata(&self, peer: &Peer) -> Result<()> {
         // bep-009
-        {
-            let torrent = self.torrent.read().await;
-            if torrent.is_some() {
-                return Ok(false);
-            }
-        }
-        {
-            let mut pieces = self.torrent_metadata_pieces.write().await;
 
-            if pieces.is_empty() {
-                if let Some(total_len) = peer
-                    .handshake
-                    .ext_handshake
-                    .as_ref()
-                    .and_then(|ext| ext.get_metadata_size())
-                {
-                    *pieces = Piece::from_length(total_len, METADATA_PIECE_SIZE);
-                }
-            }
+        let mut metadata_pm = self.metadata_pm.lock().await;
 
-            if pieces.iter().all(Piece::is_verified) {
-                return Ok(false);
-            }
-
-            let msg_id = peer
+        if metadata_pm.total_size() == 0 {
+            if let Some(total_len) = peer
                 .handshake
                 .ext_handshake
                 .as_ref()
-                .and_then(|ext| ext.get_msg_id(MSG_UT_METADATA))
-                .unwrap();
-            debug!(?peer, "send metadata req");
-            let max_req_cnt = 3;
-            for piece in pieces
-                .iter_mut()
-                .filter(|p| p.should_send_req_to_peer(peer))
-                .take(max_req_cnt)
+                .and_then(|ext| ext.get_metadata_size())
             {
-                piece.on_send_req();
-                let req = UTMetadataMessage::Request(piece.get_index());
-                peer.send_message((msg_id, req)).await?;
+                debug!(?total_len, "create torrent metadata piece manager");
+                *metadata_pm = PieceManager::from_single_file(
+                    "/tmp/snail_tmp.torrent",
+                    total_len,
+                    METADATA_PIECE_SIZE,
+                )?;
             }
-            peer.flush().await?;
         }
-        Ok(false)
+
+        if metadata_pm.all_checked() {
+            return Ok(());
+        }
+
+        let piece_info = {
+            let mut metadata_log_man = self.metadata_log_man.write().await;
+            if metadata_log_man.should_sync() {
+                metadata_log_man.sync(&mut metadata_pm)?;
+            }
+            metadata_log_man.pull(Arc::clone(&peer.peer_id))
+        };
+
+        let msg_id = peer
+            .handshake
+            .ext_handshake
+            .as_ref()
+            .and_then(|ext| ext.get_msg_id(MSG_UT_METADATA))
+            .unwrap();
+
+        for info in piece_info {
+            debug!(?info);
+            let req = UTMetadataMessage::Request(info.index);
+            peer.send_message((msg_id, req)).await?;
+        }
+        peer.flush().await?;
+
+        Ok(())
     }
 
-    async fn handle_peer(
-        &self,
-        peer: &Peer,
-        pending: &mut VecDeque<PieceFragment>,
-    ) -> Result<Option<String>> {
+    async fn handle_peer(&self, peer: &Peer) -> Result<()> {
+        let torrent_exists = { self.torrent.read().await.is_some() };
+
+        if !torrent_exists && self.support_ut_metadata(peer) {
+            self.handle_req_metadata(peer).await?;
+            return Ok(());
+        }
+
         let state = { peer.state.read().await.clone() };
 
-        if self.support_ut_metadata(peer) {
-            let handled = self.handle_req_metadata(peer).await?;
-            if handled {
-                return Ok(state.broken);
-            }
-        }
+        let pending_piece_info = {
+            let mut log_man = self.piece_log_man.write().await;
+            log_man.pull(Arc::clone(&peer.peer_id))
+        };
 
         if state.choke {
-            if !pending.is_empty() {
+            if !pending_piece_info.is_empty() {
                 peer.send_message_now(BTMessage::Interested).await?;
-                return Ok(state.broken);
             }
-            return Ok(state.broken);
+            return Ok(());
         }
 
-        if state.available_fragment_req == 0 || pending.is_empty() {
-            return Ok(state.broken);
+        if pending_piece_info.is_empty() {
+            return Ok(());
         }
 
-        let mut req_piece_info = vec![];
-
-        while !pending.is_empty() {
-            {
-                let mut state = peer.state.write().await;
-                if state.available_fragment_req == 0 {
-                    break;
-                }
-                state.available_fragment_req -= 1;
-            }
-            let frag = pending.pop_front().unwrap();
-            let mut pieces = self.pieces.write().await;
-            let piece = pieces.get_mut(frag.get_index()).unwrap();
-            piece.on_send_req();
-            req_piece_info.push(frag.into());
+        peer.send_message(BTMessage::Interested).await?;
+        for piece_info in pending_piece_info {
+            peer.send_message(BTMessage::Request(piece_info)).await?;
         }
+        peer.flush().await?;
 
-        if !req_piece_info.is_empty() {
-            peer.send_message(BTMessage::Interested).await?;
-            for piece_info in req_piece_info {
-                peer.send_message(BTMessage::Request(piece_info)).await?;
-            }
-            peer.flush().await?;
-        }
-
-        Ok(state.broken)
+        Ok(())
     }
 
     async fn tick_check_peer(self) {
         let t = async {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                {
+                    let mut log_man = self.piece_log_man.write().await;
+                    if log_man.should_sync() {
+                        let mut pm = self.piece_manager.lock().await;
+                        log_man.sync(&mut pm)?;
+                    }
+                }
                 let mut broken_peers = vec![];
                 let peers = { self.peers.read().await.clone() };
+
                 for peer in peers {
-                    let mut pending = self.pending_fragments(&peer).await;
-                    if let Some(reason) = self.handle_peer(&peer, &mut pending).await? {
+                    self.handle_peer(&peer).await?;
+                    let broken = { peer.state.read().await.broken.clone() };
+                    if let Some(reason) = broken {
                         broken_peers.push((peer, reason));
                     }
                 }
@@ -734,8 +730,14 @@ impl TorrentSession {
     async fn tick_peer_message(self, peer: Peer, mut bt_msg_rx: mpsc::Receiver<BTMessage>) {
         let t = async {
             loop {
-                while let Some(msg) = bt_msg_rx.recv().await {
-                    self.handle_message(&peer, &msg).await?;
+                match bt_msg_rx.try_recv() {
+                    Ok(msg) => {
+                        self.handle_message(&peer, &msg).await?;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
                 }
             }
         };
@@ -757,25 +759,21 @@ impl TorrentSession {
         let t = async {
             loop {
                 while let Some((peer, info)) = peer_req_rx.recv().await {
-                    let pieces = self.pieces.read().await;
-                    if let Some(p) = pieces.iter().find(|p| p.get_index() == info.index as usize) {
-                        let frags = p.finished_fragments(info.begin as usize, info.length as usize);
-                        let msgs = frags.into_iter().map(|f| {
-                            BTMessage::Piece(PieceData {
-                                index: f.get_index() as u32,
-                                begin: f.get_begin() as u32,
-                                fragment: p.get_buf()[f.get_begin()..f.get_begin() + f.get_len()]
-                                    .to_vec(),
-                            })
-                        });
-                        for msg in msgs {
-                            peer.send_message(msg).await?;
+                    {
+                        let mut pm = self.piece_manager.lock().await;
+                        let index = info.index;
+                        if pm.is_checked(index) {
+                            let piece = pm.fetch(index)?;
+                            let piece_data = PieceData::new(
+                                index,
+                                info.begin,
+                                &piece.buf()[info.begin..info.begin + info.length],
+                            );
+                            peer.send_message_now(BTMessage::from(piece_data)).await?;
                         }
-                        peer.flush().await?;
                     }
                 }
             }
-            Ok(())
         };
 
         tokio::select! {
@@ -791,7 +789,6 @@ impl TorrentSession {
 
     async fn tick_consume_short_term(self) {
         use tokio::time::sleep;
-        use tokio::time::Duration;
         'next_round: loop {
             // wait 5s or it was cancelled
             tokio::select! {
@@ -814,7 +811,7 @@ impl TorrentSession {
                         // one task is complete
                     },
                     else => {
-                        // task is incomplete, wait next round
+                        // all task is incomplete, wait next round
                         continue 'next_round;
                     }
                 }
@@ -848,6 +845,10 @@ impl TorrentSession {
                 peer.shutdown().await?;
             }
         }
+        {
+            let mut pm = self.piece_manager.lock().await;
+            pm.flush()?;
+        }
         Ok(())
     }
 
@@ -873,6 +874,12 @@ impl TorrentSession {
         {
             let mut long_term = self.long_term_tasks.write().await;
             while long_term.join_next().await.is_some() {}
+        }
+        {
+            let mut cache = self.piece_manager.lock().await;
+            if let Err(err) = cache.flush() {
+                error!(?err)
+            }
         }
         Ok(())
     }

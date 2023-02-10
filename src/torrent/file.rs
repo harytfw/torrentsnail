@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::{bencode, Result};
@@ -67,7 +68,7 @@ impl TorrentInfo {
         }
     }
 
-    pub fn get_pieces_sha1(&self, index: usize) -> &[u8] {
+    pub fn get_piece_sha1(&self, index: usize) -> &[u8] {
         &self.pieces[index * 20..(index + 1) * 20]
     }
 
@@ -96,7 +97,7 @@ impl TorrentInfo {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TorrentFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announce: Option<String>,
@@ -160,6 +161,29 @@ impl TorrentFile {
     pub fn set_origin_content(&mut self, val: bencode::Value) -> &mut Self {
         self.origin_content = Some(val.into());
         self
+    }
+
+    pub fn set_origin_info(&mut self, val: bencode::Value) -> &mut Self {
+        let dict = self
+            .origin_content
+            .get_or_insert_with(|| bencode::Value::Dictionary(BTreeMap::new()).into());
+        match dict.as_mut() {
+            bencode::Value::Dictionary(dict) => {
+                dict.insert("info".into(), val);
+            }
+            _ => todo!("not dictionary"),
+        }
+        self
+    }
+
+    pub fn get_origin_content(&self) -> Option<&bencode::Value> {
+        self.origin_content.as_deref()
+    }
+
+    pub fn get_origin_info(&self) -> Option<&bencode::Value> {
+        self.origin_content
+            .as_ref()
+            .and_then(|v| v.dict_get("info"))
     }
 
     pub fn info_hash(&self) -> Option<HashId> {

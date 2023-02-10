@@ -9,8 +9,8 @@ use std::{collections::BTreeMap, fmt::Debug};
 
 #[derive(Clone)]
 pub struct PieceData {
-    pub index: u32,
-    pub begin: u32,
+    pub index: usize,
+    pub begin: usize,
     pub fragment: Vec<u8>,
 }
 
@@ -24,36 +24,50 @@ impl Debug for PieceData {
 }
 
 impl PieceData {
-    pub fn sha1(&self) -> Result<[u8; 20]> {
-        let info_hash =
-            ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &self.fragment);
-        let hash = info_hash.as_ref().try_into().unwrap();
-        Ok(hash)
+    pub fn new(index: usize, begin: usize, buf: &[u8]) -> Self {
+        Self {
+            index,
+            begin,
+            fragment: buf.to_vec(),
+        }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         [
-            &self.index.to_be_bytes(),
-            &self.begin.to_be_bytes(),
+            &(self.index as u32).to_be_bytes(),
+            &(self.begin as u32).to_be_bytes(),
             self.fragment.as_slice(),
         ]
         .concat()
     }
 }
 
+impl From<PieceData> for BTMessage {
+    fn from(data: PieceData) -> Self {
+        Self::Piece(data)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PieceInfo {
-    pub index: u32,
-    pub begin: u32,
-    pub length: u32,
+    pub index: usize,
+    pub begin: usize,
+    pub length: usize,
 }
 
 impl PieceInfo {
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn new(index: usize, begin: usize, length: usize) -> Self {
+        Self {
+            index,
+            begin,
+            length,
+        }
+    }
+    fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(32);
-        buf.write_u32::<NetworkEndian>(self.index).unwrap();
-        buf.write_u32::<NetworkEndian>(self.begin).unwrap();
-        buf.write_u32::<NetworkEndian>(self.length).unwrap();
+        buf.write_u32::<NetworkEndian>(self.index as u32).unwrap();
+        buf.write_u32::<NetworkEndian>(self.begin as u32).unwrap();
+        buf.write_u32::<NetworkEndian>(self.length as u32).unwrap();
         buf
     }
 }
@@ -83,6 +97,7 @@ impl Debug for BTExtension {
 }
 
 impl BTExtension {
+    
     pub fn new() -> Self {
         Default::default()
     }
@@ -241,7 +256,7 @@ impl BTMessage {
             Self::Piece(_) => "Piece(7)".into(),
             Self::Cancel(_) => "Cancel(8)".into(),
             Self::Ext(_) => "Ext(20)".into(),
-            Self::Unknown(n) => format!("Unknown({n})")
+            Self::Unknown(n) => format!("Unknown({n})"),
         }
     }
 
@@ -292,11 +307,10 @@ impl BTMessage {
             return Ok(Self::Ping);
         }
 
-
         let typ = r.read_u8().await?;
-        
+
         let payload_len = len - 1;
-        
+
         let msg = match typ {
             0 => Self::Choke,
             1 => Self::Unchoke,
@@ -315,11 +329,7 @@ impl BTMessage {
                 let index = r.read_u32().await?;
                 let begin = r.read_u32().await?;
                 let length = r.read_u32().await?;
-                let info = PieceInfo {
-                    index,
-                    begin,
-                    length,
-                };
+                let info = PieceInfo::new(index as usize, begin as usize, length as usize);
                 match typ {
                     6 => Self::Request(info),
                     8 => Self::Cancel(info),
@@ -331,8 +341,8 @@ impl BTMessage {
                 let begin = r.read_u32().await?;
                 let fragment_len = payload_len - 4 - 4;
                 let mut data = PieceData {
-                    index,
-                    begin,
+                    index: index as usize,
+                    begin: begin as usize,
                     fragment: vec![0; fragment_len],
                 };
                 r.read_exact(&mut data.fragment).await?;
@@ -345,9 +355,7 @@ impl BTMessage {
                 r.read_exact(&mut ext_payload).await?;
                 Self::Ext(BTExtMessage::new(ext_id, ext_payload))
             }
-            msg_id => {
-                Self::Unknown(msg_id)
-            }
+            msg_id => Self::Unknown(msg_id),
         };
         Ok(msg)
     }
@@ -578,9 +586,8 @@ impl UTMetadataMessage {
 
 #[cfg(test)]
 mod tests {
-    
 
-    use super::{BTExtension};
+    use super::BTExtension;
 
     #[test]
     fn extension() {

@@ -51,7 +51,9 @@ pub enum Error {
     #[error("unknown message type: {0}")]
     UnknownMessageType(u8),
     #[error("handshake: {0}")]
-    Handshake(String)
+    Handshake(String),
+    #[error("piece {0} not found")]
+    PieceNotFound(usize)
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
