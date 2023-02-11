@@ -135,7 +135,9 @@ impl FileFragment {
 
 struct FilePieceMap {
     fragments: Vec<FileFragment>,
+    // the file path
     path: PathBuf,
+    // the size of complete file
     size: usize,
     // TODO: use rang to represent used range
     piece_indices: HashSet<usize>,
@@ -316,7 +318,7 @@ impl FilePieceMapBuilder {
 pub struct PieceManager {
     name: String,
     cache: BTreeMap<usize, Piece>,
-    piece_len: usize,
+    first_piece_len: usize,
     piece_num: usize,
     last_piece_len: usize,
     maps: Vec<FilePieceMap>,
@@ -355,7 +357,7 @@ impl PieceManager {
         let mut cache = Self {
             name: info.name.clone(),
             cache: Default::default(),
-            piece_len: info.piece_length,
+            first_piece_len: info.piece_length,
             piece_num,
             last_piece_len,
             maps,
@@ -389,7 +391,7 @@ impl PieceManager {
                 .unwrap(),
 
             cache: Default::default(),
-            piece_len,
+            first_piece_len: piece_len,
             piece_num,
             last_piece_len,
             cache_size: total_size,
@@ -406,13 +408,13 @@ impl PieceManager {
         Default::default()
     }
 
-    pub fn fetch(&mut self, index: usize) -> Result<&mut Piece> {
-        if index >= self.piece_num {
-            return Err(Error::PieceNotFound(index));
-        }
-
+    pub fn fetch(&mut self, index: usize) -> Result<&Piece> {
         if self.cache.contains_key(&index) {
             return Ok(self.cache.get_mut(&index).unwrap());
+        }
+
+        if index >= self.piece_num {
+            return Err(Error::PieceNotFound(index));
         }
 
         let piece_len = self.piece_len(index);
@@ -455,6 +457,23 @@ impl PieceManager {
         self.checked_bits[index]
     }
 
+    pub fn assume_checked(&mut self) {
+        for i in 0..self.piece_num {
+            self.checked_bits.set(i, true);
+        }
+    }
+
+    pub fn fix_file_size(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        if let Some(m) = self.maps.iter().find(|m| m.path == path.as_ref()) {
+            let metadata = m.path.metadata()?;
+            if metadata.len() as usize > m.size {
+                let f = fs::OpenOptions::new().write(true).open(path.as_ref())?;
+                f.set_len(m.size as u64)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn check(&mut self, index: usize, checksum: &[u8]) -> Result<bool> {
         let piece = self.fetch(index)?;
         let b = match checksum.len() {
@@ -466,8 +485,27 @@ impl PieceManager {
         Ok(b)
     }
 
+    pub fn check_file<'a>(
+        &mut self,
+        path: impl AsRef<Path>,
+        checksum_fn: impl Fn(usize) -> &'a [u8],
+    ) -> Result<bool> {
+        let indices = self
+            .maps
+            .iter()
+            .find(|m| m.path == path.as_ref())
+            .map(|m| m.piece_indices.clone())
+            .unwrap_or_else(HashSet::new);
+        let mut b = true;
+        for index in indices {
+            self.cache.remove(&index);
+            b &= self.check(index, checksum_fn(index))?;
+        }
+        Ok(b)
+    }
+
     pub fn flush(&mut self) -> Result<()> {
-        debug!("piece manager flush");
+        debug!(?self.name, "piece manager flush");
         for (_, piece) in self.cache.iter() {
             for m in self.maps.iter() {
                 if m.contains_index(piece.index) {
@@ -488,7 +526,7 @@ impl PieceManager {
         if index == self.piece_num - 1 {
             self.last_piece_len
         } else {
-            self.piece_len
+            self.first_piece_len
         }
     }
 
@@ -549,8 +587,13 @@ impl PieceManager {
             }
         }
     }
+
     pub fn checked_bits(&self) -> &BitVec {
         &self.checked_bits
+    }
+
+    pub fn paths(&self) -> Vec<&Path> {
+        self.maps.iter().map(|m| m.path.as_path()).collect()
     }
 }
 
@@ -771,7 +814,11 @@ impl PieceLogManager {
 mod tests {
     use crate::torrent::TorrentFile;
     use glob::glob;
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        io::{Seek, Write},
+        path::PathBuf,
+    };
 
     use super::*;
 
@@ -856,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn piece_manager_read_write() -> Result<()> {
+    fn piece_manager() -> Result<()> {
         let torrent_path = setup_test_torrent();
 
         let torrent = TorrentFile::from_path(&torrent_path)?;
@@ -875,6 +922,10 @@ mod tests {
             assert!(pm.check(i, sha1_fn(i))?);
         }
 
+        for i in 0..pm.piece_num() {
+            assert!(pm.is_checked(i));
+        }
+
         {
             let origin_piece = pm.read(0)?;
             let mut piece = origin_piece.clone();
@@ -883,6 +934,60 @@ mod tests {
             assert!(!pm.check(0, sha1_fn(0))?);
             pm.write(origin_piece)?;
             assert!(pm.check(0, sha1_fn(0))?);
+        }
+
+        {
+            let paths = pm
+                .paths()
+                .iter()
+                .map(|p| p.to_path_buf())
+                .collect::<Vec<PathBuf>>();
+            let mut first_byte_vec = vec![];
+            for p in paths.iter() {
+                let file = fs::OpenOptions::new()
+                    .write(true)
+                    .read(true)
+                    .open(p)
+                    .unwrap();
+                let mut byte: u8 = 0;
+                file.read_at(std::slice::from_mut(&mut byte), 0).unwrap();
+                first_byte_vec.push(byte);
+                file.write_at(b"0", 0).unwrap();
+            }
+
+            for p in paths.iter() {
+                assert!(!pm.check_file(p, sha1_fn).unwrap());
+            }
+
+            for (p, byte) in paths.iter().zip(first_byte_vec.iter()) {
+                let file = fs::OpenOptions::new()
+                    .write(true)
+                    .read(true)
+                    .open(p)
+                    .unwrap();
+                file.write_at(std::slice::from_ref(byte), 0).unwrap();
+            }
+
+            for p in paths.iter() {
+                assert!(pm.check_file(p, sha1_fn).unwrap());
+            }
+        }
+
+        {
+            let origin_size = pm.maps[0].size as u64;
+            let path = pm.maps[0].path.clone();
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            assert_eq!(file.metadata().unwrap().len(), origin_size);
+            file.seek(io::SeekFrom::End(0)).unwrap();
+            file.write_all(b"12345").unwrap();
+            file.flush().unwrap();
+            assert_eq!(file.metadata().unwrap().len(), origin_size + 5);
+            pm.fix_file_size(path).unwrap();
+            assert_eq!(file.metadata().unwrap().len(), origin_size);
         }
 
         Ok(())

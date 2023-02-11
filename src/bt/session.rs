@@ -9,10 +9,10 @@ use crate::torrent::TorrentFile;
 use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
-use std::fs;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -25,6 +25,189 @@ use tracing::{debug, error, warn};
 
 const MSG_UT_METADATA: &str = "ut_metadata";
 const METADATA_PIECE_SIZE: usize = 16384;
+
+#[derive(Default)]
+pub struct TorrentSessionBuilder {
+    info_hash: Option<HashId>,
+    torrent_path: Option<PathBuf>,
+    torrent: Option<TorrentFile>,
+    storage_dir: Option<PathBuf>,
+    bt: Option<Weak<BT>>,
+    check_files: bool,
+}
+
+impl TorrentSessionBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_bt(self, bt: Weak<BT>) -> Self {
+        Self {
+            bt: Some(bt),
+            ..self
+        }
+    }
+
+    pub fn with_info_hash(self, info_hash: HashId) -> Self {
+        Self {
+            info_hash: Some(info_hash),
+            ..self
+        }
+    }
+
+    pub fn with_torrent_path(self, path: impl AsRef<Path>) -> Self {
+        Self {
+            torrent_path: Some(path.as_ref().to_path_buf()),
+            ..self
+        }
+    }
+
+    pub fn with_torrent(self, torrent: TorrentFile) -> Self {
+        Self {
+            torrent: Some(torrent),
+            ..self
+        }
+    }
+
+    pub fn with_storage_dir(self, path: impl AsRef<Path>) -> Self {
+        Self {
+            storage_dir: Some(path.as_ref().to_path_buf()),
+            ..self
+        }
+    }
+
+    pub fn with_check_files(self, check: bool) -> Self {
+        Self {
+            check_files: check,
+            ..self
+        }
+    }
+
+    fn build_handshake(my_id: &HashId, info_hash: &HashId) -> BTHandshake {
+        let mut handshake = BTHandshake::new(my_id, info_hash);
+
+        handshake.set_ext_handshake(true);
+        {
+            let ext = handshake.ext_handshake.as_mut().unwrap();
+            ext.set_msg(2, MSG_UT_METADATA).set_version(SNAIL_VERSION);
+        }
+        handshake
+    }
+
+    pub fn build(mut self) -> Result<TorrentSession> {
+        let bt_weak = self.bt.unwrap();
+        let bt = bt_weak.upgrade().unwrap();
+
+        let mut pm: PieceManager;
+        let mut metadata_cache: PieceManager;
+        let piece_log_man = PieceLogManager::new();
+        let metadata_log_man = PieceLogManager::new();
+
+        let mut torrent = self.torrent.take();
+        let mut info_hash = HashId::ZERO_V1;
+
+        if let Some(hash) = self.info_hash {
+            info_hash = hash;
+        }
+
+        let storage_dir: PathBuf = self
+            .storage_dir
+            .unwrap_or_else(|| PathBuf::from("~/Download/snail"));
+
+        let torrent_path = self
+            .torrent_path
+            .unwrap_or_else(|| PathBuf::from("~/Download/snail"));
+
+        if torrent_path.try_exists().unwrap() {
+            let torrent_file = TorrentFile::from_path(&torrent_path)?;
+            torrent = Some(torrent_file);
+        }
+
+        if let Some(torrent) = torrent.as_ref() {
+            info_hash = torrent.info_hash().unwrap();
+            pm = PieceManager::from_torrent_info(storage_dir, &torrent.info)?;
+            let metadata_buf = bencode::to_bytes(torrent.get_origin_info().unwrap())?;
+            metadata_cache = PieceManager::from_single_file(
+                &torrent_path,
+                metadata_buf.len(),
+                METADATA_PIECE_SIZE,
+            )?;
+            metadata_cache.assume_checked();
+
+            if self.check_files {
+                let paths: Vec<PathBuf> = pm.paths().iter().map(|p| p.to_path_buf()).collect();
+                for path in paths {
+                    let pass = pm.check_file(&path, |i| torrent.info.get_piece_sha1(i))?;
+                    debug!(?path, ?pass, "check file");
+                }
+            }
+        } else {
+            pm = PieceManager::empty();
+            metadata_cache = PieceManager::empty();
+        }
+
+        let handshake_template = Self::build_handshake(&bt.my_id, &info_hash);
+
+        let (peer_conn_req_tx, peer_addr_rx) = mpsc::channel(10);
+        let (peer_piece_req_tx, peer_piece_req_rx) = mpsc::channel(50);
+
+        if info_hash.is_zero() {
+            return Err(Error::Generic("no info hash".into()));
+        }
+
+        let ts = TorrentSession {
+            bt_weak,
+            peers: Arc::new(RwLock::new(vec![])),
+            info_hash: Arc::new(info_hash),
+            metadata_pm: Arc::new(Mutex::new(metadata_cache)),
+            handshake_template: Arc::new(handshake_template),
+            torrent: Arc::new(RwLock::new(torrent)),
+            peer_conn_req_tx,
+            peer_piece_req_tx,
+            piece_manager: Arc::new(Mutex::new(pm)),
+            piece_log_man: Arc::new(RwLock::new(piece_log_man)),
+            metadata_log_man: Arc::new(RwLock::new(metadata_log_man)),
+            long_term_tasks: Default::default(),
+            short_term_tasks: Default::default(),
+            cancel: CancellationToken::new(),
+            status: Arc::new(AtomicU32::new(Status::Started as u32)),
+        };
+        {
+            let ts_clone = ts.clone();
+            tokio::spawn(async move {
+                ts_clone.start_tick(peer_addr_rx, peer_piece_req_rx).await;
+            });
+        }
+        Ok(ts)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Status {
+    Stopped,
+    Started,
+    Seeding,
+}
+
+impl Status {
+    pub fn to_u32(self) -> u32 {
+        match self {
+            Self::Started => 0,
+            Self::Stopped => 1,
+            Self::Seeding => 2,
+        }
+    }
+
+    pub fn from_u32(num: u32) -> Option<Self> {
+        let s = match num {
+            0 => Self::Started,
+            1 => Self::Stopped,
+            2 => Self::Seeding,
+            _ => return None,
+        };
+        Some(s)
+    }
+}
 
 #[derive(Clone)]
 pub struct TorrentSession {
@@ -42,65 +225,10 @@ pub struct TorrentSession {
     metadata_pm: Arc<Mutex<PieceManager>>,
     piece_log_man: Arc<RwLock<PieceLogManager>>,
     metadata_log_man: Arc<RwLock<PieceLogManager>>,
+    status: Arc<AtomicU32>,
 }
 
 impl TorrentSession {
-    pub async fn from_torrent(bt: Weak<BT>, torrent: TorrentFile) -> Result<Self> {
-        Self::build(bt, torrent.info_hash().unwrap(), Some(torrent)).await
-    }
-
-    pub async fn from_info_hash(bt: Weak<BT>, info_hash: HashId) -> Result<Self> {
-        Self::build(bt, info_hash, None).await
-    }
-
-    async fn build(bt: Weak<BT>, info_hash: HashId, torrent: Option<TorrentFile>) -> Result<Self> {
-        let bt_arc = bt.upgrade().unwrap();
-
-        let info_hash = Arc::new(info_hash);
-        let handshake_template = Self::build_handshake(&bt_arc.my_id, &info_hash);
-
-        let cache: PieceManager;
-        let metadata_cache: PieceManager;
-        let piece_log_man = PieceLogManager::new();
-        let metadata_log_man = PieceLogManager::new();
-        if let Some(torrent) = torrent.as_ref() {
-            cache = PieceManager::from_torrent_info("/tmp/snail/", &torrent.info)?;
-            let mut tmp_path = PathBuf::from("/tmp/snail/");
-            tmp_path.push(format!("{}.torrent", torrent.info.name));
-            let metadata_buf = bencode::to_bytes(torrent.get_origin_info().unwrap())?;
-            fs::write(&tmp_path, &metadata_buf)?;
-            metadata_cache =
-                PieceManager::from_single_file(&tmp_path, metadata_buf.len(), METADATA_PIECE_SIZE)?;
-        } else {
-            cache = PieceManager::empty();
-            metadata_cache = PieceManager::empty();
-        }
-
-        debug!(?info_hash, "new torrent session from info hash");
-
-        let (peer_conn_req_tx, peer_addr_rx) = mpsc::channel(10);
-        let (peer_piece_req_tx, peer_piece_req_rx) = mpsc::channel(50);
-
-        let s = Self {
-            bt_weak: bt,
-            peers: Arc::new(RwLock::new(vec![])),
-            info_hash: Arc::clone(&info_hash),
-            cancel: CancellationToken::new(),
-            metadata_pm: Arc::new(Mutex::new(metadata_cache)),
-            handshake_template: Arc::new(handshake_template),
-            torrent: Arc::new(RwLock::new(torrent)),
-            peer_conn_req_tx,
-            peer_piece_req_tx,
-            long_term_tasks: Arc::new(RwLock::new(JoinSet::new())),
-            short_term_tasks: Default::default(),
-            piece_manager: Arc::new(Mutex::new(cache)),
-            piece_log_man: Arc::new(RwLock::new(piece_log_man)),
-            metadata_log_man: Arc::new(RwLock::new(metadata_log_man)),
-        };
-        s.start_tick(peer_addr_rx, peer_piece_req_rx).await;
-        Ok(s)
-    }
-
     pub async fn passive_handshake(
         &self,
         peer_handshake: BTHandshake,
@@ -152,17 +280,6 @@ impl TorrentSession {
 
     fn bt(&self) -> Arc<BT> {
         self.bt_weak.upgrade().expect("bt is destroyed")
-    }
-
-    fn build_handshake(my_id: &HashId, info_hash: &HashId) -> BTHandshake {
-        let mut handshake = BTHandshake::new(my_id, info_hash);
-
-        handshake.set_ext_handshake(true);
-        {
-            let ext = handshake.ext_handshake.as_mut().unwrap();
-            ext.set_msg(2, MSG_UT_METADATA).set_version(SNAIL_VERSION);
-        }
-        handshake
     }
 
     async fn ext_handshake(
@@ -831,9 +948,20 @@ impl TorrentSession {
         }
     }
 
+    pub async fn add_peer_with_addr(&self, addr: impl ToSocketAddrs) -> Result<Peer> {
+        let tcp = TcpStream::connect(addr).await?;
+        debug!(local_addr =?tcp.local_addr(), peer_addr = ?tcp.peer_addr(), "manually add peer");
+        self.active_handshake(tcp).await
+    }
+
+    pub fn status(&self) -> Status {
+        Status::from_u32(self.status.load(Ordering::Acquire)).unwrap()
+    }
+
     pub async fn start(&self) -> Result<()> {
         self.bt().dht.search_info_hash(&self.info_hash).await?;
         self.announce_tracker_event(tracker::Event::Started).await?;
+        self.status.store(Status::Started as u32, Ordering::Release);
         Ok(())
     }
 
@@ -848,6 +976,7 @@ impl TorrentSession {
             let mut pm = self.piece_manager.lock().await;
             pm.flush()?;
         }
+        self.status.store(Status::Stopped as u32, Ordering::Release);
         Ok(())
     }
 
@@ -855,12 +984,6 @@ impl TorrentSession {
         self.stop().await?;
         self.cancel.cancel();
         Ok(())
-    }
-
-    pub async fn add_peer_with_addr(&self, addr: impl ToSocketAddrs) -> Result<Peer> {
-        let tcp = TcpStream::connect(addr).await?;
-        debug!(local_addr =?tcp.local_addr(), peer_addr = ?tcp.peer_addr(), "manually add peer");
-        self.active_handshake(tcp).await
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -881,5 +1004,9 @@ impl TorrentSession {
             }
         }
         Ok(())
+    }
+
+    pub fn piece_manager(&self) -> Arc<Mutex<PieceManager>> {
+        Arc::clone(&self.piece_manager)
     }
 }

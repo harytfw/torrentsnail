@@ -3,7 +3,7 @@ use crate::bt::{
     Error, Result,
 };
 use crate::torrent::HashId;
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 use tokio::{io::AsyncWriteExt, sync::mpsc, sync::RwLock};
 use tokio::{
     net::{
@@ -13,7 +13,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{debug, error};
 
 #[derive(Debug, Clone)]
 pub struct PeerState {
@@ -21,7 +21,6 @@ pub struct PeerState {
     pub choke: bool,
     pub interested: bool,
     pub owned_pieces: bit_vec::BitVec,
-    pub available_fragment_req: usize,
 }
 
 impl Default for PeerState {
@@ -31,7 +30,6 @@ impl Default for PeerState {
             broken: None,
             interested: false,
             owned_pieces: Default::default(),
-            available_fragment_req: 30,
         }
     }
 }
@@ -93,7 +91,7 @@ impl Peer {
         {
             let mut task = peer.tasks.write().await;
             task.spawn(peer.clone().read_tcp(tcp_rx));
-            tokio::spawn(peer.clone().write_tcp(tcp_tx, msg_tcp_rx));
+            task.spawn(peer.clone().write_tcp(tcp_tx, msg_tcp_rx));
         }
 
         Ok((peer, msg_rx))
@@ -103,6 +101,7 @@ impl Peer {
         self.cancel.cancel();
         let mut tasks = self.tasks.write().await;
         while tasks.join_next().await.is_some() {}
+        debug!(peer_id=?self.peer_id, addr = ?self.addr, "shutdown peer");
         Ok(())
     }
 
@@ -166,8 +165,6 @@ impl Peer {
     }
 
     async fn read_tcp(self, rx: OwnedReadHalf) {
-        static MAX_BUFFER_SIZE: usize = 64 << 20;
-
         let mut buf_rx = tokio::io::BufReader::new(rx);
         let t = async {
             loop {

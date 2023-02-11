@@ -98,7 +98,7 @@ impl TorrentInfo {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct TorrentFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announce: Option<String>,
@@ -135,6 +135,18 @@ pub struct TorrentFile {
 
     #[serde(skip)]
     origin_content: Option<Box<bencode::Value>>,
+}
+
+impl std::fmt::Debug for TorrentFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TorrentFile")
+            .field("announce", &self.announce)
+            .field("comment", &self.comment)
+            .field("created_by", &self.created_by)
+            .field("creation_date", &self.creation_date)
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TorrentFile {

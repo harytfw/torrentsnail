@@ -11,7 +11,7 @@ use tracing::{debug, debug_span, error, span, Instrument, Level};
 pub mod peer;
 pub mod session;
 pub mod types;
-use self::types::BTHandshake;
+use self::{session::TorrentSessionBuilder, types::BTHandshake};
 use crate::{
     dht::DHT,
     lsd::LSD,
@@ -80,9 +80,12 @@ impl BT {
                 return Ok(s.clone());
             }
         }
-        let s = TorrentSession::from_torrent(Arc::downgrade(self), torrent).await?;
-        sessions.push(s.clone());
-        Ok(s)
+        let ts = TorrentSessionBuilder::new()
+            .with_bt(Arc::downgrade(self))
+            .with_torrent(torrent)
+            .build()?;
+        sessions.push(ts.clone());
+        Ok(ts)
     }
 
     pub async fn download_with_info_hash(
@@ -95,9 +98,12 @@ impl BT {
                 return Ok(s.clone());
             }
         }
-        let s = TorrentSession::from_info_hash(Arc::downgrade(self), *info_hash).await?;
-        sessions.push(s.clone());
-        Ok(s)
+        let mut ts = TorrentSessionBuilder::new()
+            .with_bt(Arc::downgrade(self))
+            .with_info_hash(*info_hash)
+            .build()?;
+        sessions.push(ts.clone());
+        Ok(ts)
     }
 
     async fn accept_tcp(self: Arc<Self>, listener: TcpListener) {
