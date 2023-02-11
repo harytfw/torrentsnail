@@ -111,13 +111,9 @@ impl TorrentSessionBuilder {
             info_hash = hash;
         }
 
-        let storage_dir: PathBuf = self
-            .storage_dir
-            .unwrap_or_else(|| PathBuf::from("~/Download/snail"));
-
-        let torrent_path = self
-            .torrent_path
-            .unwrap_or_else(|| PathBuf::from("~/Download/snail"));
+        let temp_dir = std::env::temp_dir();
+        let storage_dir: PathBuf = self.storage_dir.unwrap_or_else(|| temp_dir.join("snail"));
+        let torrent_path = self.torrent_path.unwrap_or_else(|| temp_dir.join("snail"));
 
         if torrent_path.try_exists().unwrap() {
             let torrent_file = TorrentFile::from_path(&torrent_path)?;
@@ -126,7 +122,7 @@ impl TorrentSessionBuilder {
 
         if let Some(torrent) = torrent.as_ref() {
             info_hash = torrent.info_hash().unwrap();
-            pm = PieceManager::from_torrent_info(storage_dir, &torrent.info)?;
+            pm = PieceManager::from_torrent_info(&storage_dir, &torrent.info)?;
             let metadata_buf = bencode::to_bytes(torrent.get_origin_info().unwrap())?;
             metadata_cache = PieceManager::from_single_file(
                 &torrent_path,
@@ -175,6 +171,7 @@ impl TorrentSessionBuilder {
             short_term_tasks: Default::default(),
             cancel: CancellationToken::new(),
             status: Arc::new(AtomicU32::new(Status::Started as u32)),
+            storage_dir: Arc::new(storage_dir),
         };
         {
             let ts_clone = ts.clone();
@@ -217,20 +214,23 @@ impl Status {
 pub struct TorrentSession {
     pub info_hash: Arc<HashId>,
     pub torrent: Arc<RwLock<Option<TorrentFile>>>,
+    storage_dir: Arc<PathBuf>,
+
     bt_weak: Weak<BT>,
     tracker: Arc<TrackerClient>,
     peers: Arc<RwLock<Vec<Peer>>>,
     handshake_template: Arc<BTHandshake>,
-    cancel: CancellationToken,
-    peer_conn_req_tx: mpsc::Sender<SocketAddr>,
-    peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
     long_term_tasks: Arc<RwLock<JoinSet<()>>>,
     short_term_tasks: Arc<RwLock<JoinSet<()>>>,
     piece_manager: Arc<Mutex<PieceManager>>,
     metadata_pm: Arc<Mutex<PieceManager>>,
     piece_log_man: Arc<RwLock<PieceLogManager>>,
     metadata_log_man: Arc<RwLock<PieceLogManager>>,
+
+    peer_conn_req_tx: mpsc::Sender<SocketAddr>,
+    peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
     status: Arc<AtomicU32>,
+    cancel: CancellationToken,
 }
 
 impl TorrentSession {
@@ -535,7 +535,6 @@ impl TorrentSession {
             }
         }
         if all_checked {
-            debug!("all checked");
             self.stop().await?;
         }
         Ok(())
@@ -664,7 +663,7 @@ impl TorrentSession {
             {
                 debug!(?total_len, ?piece_len, "construct pieces");
                 let mut cache = self.piece_manager.lock().await;
-                *cache = PieceManager::from_torrent_info("/tmp/snail/", &info)?;
+                *cache = PieceManager::from_torrent_info(self.storage_dir.as_ref(), &info)?;
 
                 let mut log_man = self.piece_log_man.write().await;
                 log_man.sync(&mut cache)?;
@@ -964,6 +963,11 @@ impl TorrentSession {
     }
 
     pub async fn start(&self) -> Result<()> {
+        {
+            let pm = self.piece_manager.lock().await;
+            let checked_num = (0..pm.piece_num()).filter(|&i| pm.is_checked(i)).count();
+            debug!(piece_num=?pm.piece_num(), ?checked_num)
+        }
         self.bt().dht.search_info_hash(&self.info_hash).await?;
         self.announce_tracker_event(tracker::Event::Started).await?;
         self.status.store(Status::Started as u32, Ordering::Release);

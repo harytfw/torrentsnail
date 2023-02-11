@@ -560,6 +560,8 @@ impl PieceManager {
         if let Some(bits) = self.read_bit_vec(&self.checked_bits_path, self.checked_bits.len()) {
             self.checked_bits = bits;
         }
+
+        debug!(bits = ?self.checked_bits);
         Ok(())
     }
 
@@ -645,7 +647,7 @@ pub struct SpeedRecord {
 impl Default for SpeedRecord {
     fn default() -> Self {
         Self {
-            max_req_bytes: 100 << 10,
+            max_req_bytes: 0,
             req_bytes: 0,
         }
     }
@@ -688,13 +690,13 @@ impl PieceLogManager {
 
         for i in 0..pm.piece_num() {
             if pm.is_checked(i) {
+                debug!(index=?i, "piece is finished, remove log");
                 self.logs.remove(&i);
             }
         }
 
         let remain_req = self.max_req.saturating_sub(self.logs.len());
 
-        let t0 = Instant::now();
         let candidate_indices: Vec<usize> = {
             let mut list: Vec<usize> = (0..pm.piece_num())
                 .filter(|&i| !pm.is_checked(i) && !self.logs.contains_key(&i))
@@ -722,6 +724,9 @@ impl PieceLogManager {
         self.sync_adaptive_at = Instant::now();
 
         for (k, v) in self.adaptive_speed.iter_mut() {
+            if v.max_req_bytes == 0 {
+                v.max_req_bytes = STEP;
+            }
             if v.req_bytes == 0 {
                 v.max_req_bytes += STEP;
             }
@@ -746,6 +751,7 @@ impl PieceLogManager {
 
         for log in self.logs.values_mut() {
             if req_record.req_bytes > req_record.max_req_bytes {
+                debug!(?req_record, "exceed max req bytes capacity");
                 break;
             }
 
