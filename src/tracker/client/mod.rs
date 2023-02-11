@@ -40,25 +40,19 @@ pub enum Session {
     Http(http::Session),
     Udp(udp::Session),
 }
+
 impl Session {
-    pub fn get_tracker_url(&self) -> &str {
+    pub fn tracker_url(&self) -> &str {
         match self {
             Self::Http(s) => s.get_tracker_url(),
-            Self::Udp(s) => s.get_tracker_url(),
+            Self::Udp(s) => s.tracker_url(),
         }
     }
 
-    pub async fn get_state(&self) -> SessionState {
+    pub async fn state(&self) -> SessionState {
         match self {
             Self::Http(s) => s.get_state().await,
-            Self::Udp(s) => s.get_state().await,
-        }
-    }
-
-    pub async fn get_state_mut(&self) -> SessionState {
-        match self {
-            Self::Http(s) => s.get_state().await,
-            Self::Udp(s) => s.get_state().await,
+            Self::Udp(s) => s.state().await,
         }
     }
 
@@ -68,6 +62,10 @@ impl Session {
             Self::Udp(s) => AnnounceResponse::V4(s.send_announce(req).await?),
         };
         Ok(rsp)
+    }
+
+    pub async fn description(&self) -> Result<String> {
+        todo!()
     }
 }
 
@@ -102,38 +100,28 @@ pub struct TrackerClient {
 }
 
 impl TrackerClient {
-    pub fn new(sock: Arc<UdpSocket>) -> Self {
+    pub fn new() -> Self {
         let http = Arc::new(TrackerHttpClient::new());
-        let udp = Arc::new(TrackerUdpClient::new(sock));
+        let udp = Arc::new(TrackerUdpClient::new());
         Self { http, udp }
     }
 
     pub async fn add_tracker(&self, tracker: &str) -> Result<()> {
         if tracker.starts_with("udp:") {
-            let session = self.udp.add_tracker(tracker).await?;
-            tokio::spawn(async move {
-                loop {
-                    debug!(tracker = ?session.url, "try connect to tracker");
-                    match session.send_connect().await {
-                        Ok(_) => {
-                            debug!(tracker = ?session.url, "success connect to tracker");
-                            return;
-                        }
-                        Err(e) => {
-                            error!(err = ?e, tracker = ?session.url, "connect tracker failed");
-                        }
-                    }
-                }
-            });
+            self.udp.add_tracker(tracker).await?;
         } else {
             self.http.add_tracker(tracker).await?;
         }
         Ok(())
     }
 
-    pub async fn all_sessions(&self) -> Vec<Session> {
+    pub async fn remove_tracker(&self, tracker: &str) -> Result<()> {
+        todo!()
+    }
+
+    pub async fn sessions(&self) -> Vec<Session> {
         let mut merge: Vec<Session> = vec![];
-        merge.extend(self.udp.all_sessions().await.into_iter().map(Into::into));
+        merge.extend(self.udp.sessions().await.into_iter().map(Into::into));
         merge.extend(self.http.all_sessions().await.into_iter().map(Into::into));
         merge
     }
@@ -144,10 +132,10 @@ impl TrackerClient {
     ) -> mpsc::Receiver<Result<(String, AnnounceResponse)>> {
         let (tx, rx) = mpsc::channel(20);
         let req = Arc::new(req.clone());
-        for session in self.all_sessions().await {
+        for session in self.sessions().await {
             let req_arc = Arc::clone(&req);
             let tx_clone = tx.clone();
-            let url = session.get_tracker_url().to_string();
+            let url = session.tracker_url().to_string();
             tokio::spawn(async move {
                 let r = session.send_announce(&req_arc).await;
                 let r = r.map(|rsp| (url, rsp));
@@ -171,11 +159,6 @@ impl TrackerClient {
     pub async fn shutdown(&self) -> Result<()> {
         self.udp.shutdown().await?;
         self.http.shutdown().await?;
-        Ok(())
-    }
-
-    pub async fn on_udp_packet(&self, packet: (Vec<u8>, SocketAddr)) -> Result<()> {
-        self.udp.on_packet(packet).await?;
         Ok(())
     }
 }

@@ -132,7 +132,6 @@ impl DHTSender {
         nodes: Option<CompactNodesV4>,
         peers: Option<Vec<SocketAddr>>,
     ) -> Result<()> {
-        debug!(dest = ?dest, "reply get peer");
 
         let mut rsp = GetPeersResponse::new(&self.my_id);
         rsp.set_t(t).set_token(token);

@@ -383,8 +383,8 @@ impl AnnounceRequest {
         buf.write_u64::<BigEndian>(self.connection_id)?;
         buf.write_u32::<BigEndian>(self.action.clone().into())?;
         buf.write_u32::<BigEndian>(self.transaction_id)?;
-        buf.extend_from_slice(&*self.info_hash);
-        buf.extend_from_slice(&*self.peer_id);
+        buf.extend_from_slice(&self.info_hash);
+        buf.extend_from_slice(&self.peer_id);
         buf.write_u64::<BigEndian>(self.downloaded)?;
         buf.write_u64::<BigEndian>(self.left)?;
         buf.write_u64::<BigEndian>(self.uploaded)?;
@@ -835,6 +835,15 @@ impl Response {
             Response::Error(e) => e.to_bytes(),
         }
     }
+
+    pub fn transaction_id(&self) -> u32 {
+        match self {
+            Self::Connect(rsp) => rsp.transaction_id,
+            Self::AnnounceV4(rsp) => rsp.transaction_id,
+            Self::Scrape(rsp) => rsp.transaction_id,
+            Self::Error(rsp) => rsp.transaction_id,
+        }
+    }
 }
 
 pub struct Authentication {
@@ -928,6 +937,7 @@ impl_serde!(
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_connect_request() -> Result<()> {
@@ -1044,5 +1054,12 @@ mod test {
     fn test_announce_to_query_string() {
         let q = AnnounceRequest::new();
         assert!(!q.to_query_string().is_empty());
+    }
+
+    #[test]
+    fn parse_packet() {
+        let data = fs::read("tests/packets/tracker/maybe-tracker.bin").unwrap();
+        let rsp = Response::from_bytes(&data).unwrap();
+        println!("{:?}", rsp);
     }
 }

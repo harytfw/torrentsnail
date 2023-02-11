@@ -43,8 +43,8 @@ impl Session {
         session
     }
 
-    async fn dispatch_packet(&self, packet: Vec<u8>) -> Result<()> {
-        self.packet_tx.send(packet).await?;
+    async fn dispatch_packet(&self, buf: &[u8]) -> Result<()> {
+        self.packet_tx.send(buf.to_vec()).await?;
         Ok(())
     }
 
@@ -52,17 +52,12 @@ impl Session {
         let t = async move {
             loop {
                 while let Some(ref buf) = chan.recv().await {
-                    let (transaction_id, rsp) = if let Ok(rsp) = ConnectResponse::from_bytes(buf) {
-                        (rsp.transaction_id, Response::Connect(rsp))
-                    } else if let Ok(rsp) = AnnounceResponseV4::from_bytes(buf) {
-                        (rsp.transaction_id, Response::AnnounceV4(rsp))
-                    } else if let Ok(rsp) = ScrapeResponse::from_bytes(buf) {
-                        (rsp.transaction_id, Response::Scrape(rsp))
-                    } else if let Ok(rsp) = TrackerError::from_bytes(buf) {
-                        (rsp.transaction_id, Response::Error(rsp))
-                    } else {
-                        debug!("unknown packet");
-                        continue;
+                    let (transaction_id, rsp) = match Response::from_bytes(buf) {
+                        Ok(rsp) => (rsp.transaction_id(), rsp),
+                        Err(err) => {
+                            error!(?err, "bad packet");
+                            continue;
+                        }
                     };
                     {
                         let mut transaction = self.transactions.lock().await;
@@ -212,11 +207,11 @@ impl Session {
         todo!()
     }
 
-    pub fn get_tracker_url(&self) -> &str {
+    pub fn tracker_url(&self) -> &str {
         &self.url
     }
 
-    pub async fn get_state(&self) -> SessionState {
+    pub async fn state(&self) -> SessionState {
         self.state.read().await.clone()
     }
 
@@ -230,24 +225,29 @@ impl Session {
 pub struct TrackerUdpClient {
     sock: Arc<UdpSocket>,
     sessions: Arc<RwLock<Vec<Session>>>,
-    cancel_token: tokio_util::sync::CancellationToken,
+    cancel: CancellationToken,
 }
 
 impl TrackerUdpClient {
-    pub fn new(sock: Arc<UdpSocket>) -> Self {
-        Self {
-            sock,
+    pub fn new() -> Self {
+        let std_sock = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        std_sock.set_nonblocking(true).unwrap();
+        let sock = UdpSocket::from_std(std_sock).unwrap();
+        let cli = Self {
+            sock: Arc::new(sock),
             sessions: Arc::new(RwLock::new(vec![])),
-            cancel_token: Default::default(),
-        }
+            cancel: Default::default(),
+        };
+        tokio::spawn(cli.clone().recv_udp());
+        cli
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        self.cancel_token.cancel();
+        self.cancel.cancel();
         Ok(())
     }
 
-    pub async fn on_packet(&self, packet: (Vec<u8>, SocketAddr)) -> Result<()> {
+    pub async fn on_packet(&self, packet: (&[u8], SocketAddr)) -> Result<()> {
         let (buf, addr) = packet;
         let sessions = self.sessions.read().await;
         if let Some(session) = sessions.iter().find(|s| s.addr.as_ref() == &addr) {
@@ -275,7 +275,7 @@ impl TrackerUdpClient {
 
         let addr_vec: Vec<SocketAddr> = tokio::net::lookup_host(host_port).await?.collect();
 
-        match addr_vec.first() {
+        let session = match addr_vec.first() {
             Some(addr) => {
                 debug!(tracker = ?tracker_url, ?addr, "new tracker session");
                 let session = Session::new(self.sock.clone(), *addr, tracker_url);
@@ -284,35 +284,76 @@ impl TrackerUdpClient {
                     sessions.push(session.clone());
                 }
                 debug!("create tracker session");
-                Ok(session)
+                session
             }
-            None => Err(Error::NoAddress),
+            None => return Err(Error::NoAddress),
+        };
+        {
+            let s = session.clone();
+            tokio::spawn(async move {
+                loop {
+                    debug!(tracker = ?s.url, "try connect to tracker");
+                    match s.send_connect().await {
+                        Ok(_) => {
+                            debug!(tracker = ?s.url, "success connect to tracker");
+                            return;
+                        }
+                        Err(e) => {
+                            error!(err = ?e, tracker = ?s.url, "connect tracker failed");
+                        }
+                    }
+                }
+            });
+        }
+        Ok(session)
+    }
+
+    pub async fn remove_tracker(&self, url: &str) {
+        let mut ss = self.sessions.write().await;
+        let index = ss
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.tracker_url() == url)
+            .map(|(i, _)| i);
+        if let Some(index) = index {
+            ss.remove(index);
         }
     }
 
-    pub async fn all_sessions(&self) -> Vec<Session> {
+    pub async fn sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read().await;
         sessions.iter().cloned().collect()
     }
 
     pub async fn get_session(&self, url: &str) -> Option<Session> {
         let sessions = self.sessions.read().await;
-        sessions
-            .iter()
-            .find(|s| s.get_tracker_url() == url)
-            .cloned()
+        sessions.iter().find(|s| s.tracker_url() == url).cloned()
+    }
+
+    async fn recv_udp(self) {
+        let t = async {
+            let mut buf = vec![0; 1024];
+            loop {
+                let (len, addr) = self.sock.recv_from(&mut buf).await?;
+                self.on_packet((&buf[..len], addr)).await?;
+            }
+        };
+        tokio::select! {
+            result = t => {
+                let result: Result<(),Error> = result;
+                match result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!(err = ?e, "recv udp");
+                    }
+                }
+            },
+            _ = self.cancel.cancelled() => { }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_client() -> Result<()> {
-        let sock = Arc::new(UdpSocket::bind("0.0.0.0:8081").await?);
-        let client = TrackerUdpClient::new(sock);
-        client.shutdown().await?;
-        Ok(())
-    }
 }

@@ -6,9 +6,10 @@ use crate::bt::types::{
 };
 use crate::bt::BT;
 use crate::torrent::TorrentFile;
+use crate::tracker::TrackerClient;
 use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -155,8 +156,11 @@ impl TorrentSessionBuilder {
             return Err(Error::Generic("no info hash".into()));
         }
 
+        let tracker = TrackerClient::new();
+
         let ts = TorrentSession {
             bt_weak,
+            tracker: Arc::new(tracker),
             peers: Arc::new(RwLock::new(vec![])),
             info_hash: Arc::new(info_hash),
             metadata_pm: Arc::new(Mutex::new(metadata_cache)),
@@ -214,6 +218,7 @@ pub struct TorrentSession {
     pub info_hash: Arc<HashId>,
     pub torrent: Arc<RwLock<Option<TorrentFile>>>,
     bt_weak: Weak<BT>,
+    tracker: Arc<TrackerClient>,
     peers: Arc<RwLock<Vec<Peer>>>,
     handshake_template: Arc<BTHandshake>,
     cancel: CancellationToken,
@@ -362,7 +367,7 @@ impl TorrentSession {
                 .set_num_want(10)
                 .set_event(event);
             debug!(req = ?req, "announce tracker");
-            let mut rx = self.bt().tracker.send_announce(&req).await;
+            let mut rx = self.tracker.send_announce(&req).await;
             loop {
                 match rx.try_recv() {
                     Ok(result) => match result {
@@ -1008,5 +1013,9 @@ impl TorrentSession {
 
     pub fn piece_manager(&self) -> Arc<Mutex<PieceManager>> {
         Arc::clone(&self.piece_manager)
+    }
+
+    pub fn tracker(&self) -> Arc<TrackerClient> {
+        Arc::clone(&self.tracker)
     }
 }

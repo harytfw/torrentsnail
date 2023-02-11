@@ -28,7 +28,6 @@ pub struct BT {
     pub listen_addr: Arc<SocketAddr>,
     dht: DHT,
     lsd: LSD,
-    tracker: TrackerClient,
     sessions: Arc<RwLock<Vec<TorrentSession>>>,
     cancel: CancellationToken,
 }
@@ -43,14 +42,11 @@ impl BT {
         let dht = { DHT::new(udp.clone(), &my_id) };
         dht.load_routing_table().await?;
 
-        let tracker = { TrackerClient::new(udp.clone()) };
-
         let lsd = { LSD::new(Arc::clone(&udp), "192.168.2.56", 8081) };
 
         let bt = Arc::new(Self {
             my_id,
             dht,
-            tracker,
             lsd,
             sessions: Arc::new(RwLock::new(vec![])),
             cancel: CancellationToken::new(),
@@ -98,7 +94,7 @@ impl BT {
                 return Ok(s.clone());
             }
         }
-        let mut ts = TorrentSessionBuilder::new()
+        let ts = TorrentSessionBuilder::new()
             .with_bt(Arc::downgrade(self))
             .with_info_hash(*info_hash)
             .build()?;
@@ -138,13 +134,7 @@ impl BT {
             loop {
                 let (len, addr) = udp.recv_from(&mut buf).await?;
                 let recv_buf = buf[..len].to_vec();
-                if recv_buf.len() > 2 && &recv_buf[..1] == b"d" {
-                    debug!(src = ?addr, "dispatch packet to dht");
-                    self.dht.on_packet((recv_buf, addr)).await?;
-                } else {
-                    debug!(src = ?addr, "dispatch packet to tracker");
-                    self.tracker.on_udp_packet((recv_buf, addr)).await?;
-                }
+                self.dht.on_packet((recv_buf, addr)).await?;
             }
         };
         tokio::select! {
@@ -224,7 +214,6 @@ impl BT {
         self.cancel.cancel();
         async {
             self.dht.shutdown().await?;
-            self.tracker.shutdown().await?;
             for session in self.sessions.write().await.drain(..) {
                 session.shutdown().await?;
             }
@@ -232,10 +221,5 @@ impl BT {
         }
         .instrument(debug_span!("shutdown"))
         .await
-    }
-
-    pub async fn add_tracker(self: &Arc<Self>, url: &str) -> Result<()> {
-        self.tracker.add_tracker(url).await?;
-        Ok(())
     }
 }
