@@ -23,19 +23,18 @@ impl LSD {
 
     #[instrument(skip(self))]
     pub async fn announce(&self, info_hash: &HashId) -> Result<()> {
-        debug!("announce lsd");
         let buf = self.build_packet(info_hash);
         self.sock.send_to(&buf, "239.192.152.143:6771").await?;
         Ok(())
     }
 
     fn build_packet(&self, info_hash: &HashId) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(64);
-        buf.extend(b"BT-SEARCH * HTTP/1.1\r\n");
-        buf.append(&mut format!("Host: {}\r\n", self.host_port.0).into_bytes());
-        buf.append(&mut format!("Port: {}\r\n", self.host_port.1).into_bytes());
-        buf.append(&mut format!("Infohash: {}\r\n", info_hash.hex()).into_bytes());
-        buf.extend(b"\r\n\r\n");
-        buf
+        let mut buf = String::with_capacity(64);
+        buf.push_str("BT-SEARCH * HTTP/1.1\r\n");
+        buf.push_str(&format!("Host: {}\r\n", self.host_port.0));
+        buf.push_str(&format!("Port: {}\r\n", self.host_port.1));
+        buf.push_str(&format!("Infohash: {}\r\n", info_hash.hex()));
+        buf.push_str("\r\n\r\n");
+        buf.into_bytes()
     }
 }
