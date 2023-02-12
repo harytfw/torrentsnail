@@ -9,7 +9,7 @@ use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
 use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -600,12 +600,9 @@ impl TorrentSession {
                 peer.send_message_now((msg_id, msg)).await?;
             }
 
-            UTMetadataMessage::Reject(_index) => {
-                // let mut cache = self.metadata_cache.write().await;
-                // let piece =  cache.fetch(*index).await?;
-                // if !piece.is_all_received() {
-                //     peer.send_message_now((msg_id, msg)).await?;
-                // }
+            UTMetadataMessage::Reject(index) => {
+                let mut plm = self.metadata_log_man.write().await;
+                plm.on_reject(*index, Arc::clone(&peer.peer_id))
             }
 
             UTMetadataMessage::Data(piece_data) => {

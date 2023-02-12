@@ -605,6 +605,7 @@ struct PieceLog {
     offset: usize,
     bits: BitVec,
     buf: Vec<u8>,
+    reject: uluru::LRUCache<Arc<HashId>, 20>,
 }
 
 impl Debug for PieceLog {
@@ -625,6 +626,7 @@ impl PieceLog {
             offset: 0,
             bits: BitVec::from_elem(piece_len, false),
             buf: vec![0u8; piece_len],
+            reject: Default::default(),
         }
     }
 }
@@ -638,14 +640,11 @@ fn shuffle_slice<T>(mut slice: &mut [T]) {
     }
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SpeedRecord {
     max_req_bytes: usize,
     req_bytes: usize,
 }
-
-
 
 pub struct PieceLogManager {
     max_req: usize,
@@ -749,7 +748,9 @@ impl PieceLogManager {
                 break;
             }
 
-            let skip = matches!(log.peer, Some((_, at)) if at.elapsed() < Duration::from_secs(15));
+            let mut skip =
+                matches!(log.peer, Some((_, at)) if at.elapsed() < Duration::from_secs(15));
+            skip |= log.reject.find(|id| id == &peer_id).is_some();
             if !skip {
                 log.peer = Some((Arc::clone(&peer_id), Instant::now()));
                 let len = cmp::min(log.bits.len() - log.offset, self.fragment_len);
@@ -807,6 +808,12 @@ impl PieceLogManager {
 
     pub fn used_indices(&self) -> Vec<usize> {
         self.logs.keys().copied().collect()
+    }
+
+    pub fn on_reject(&mut self, index: usize, peer_id: Arc<HashId>) {
+        if let Some(log) = self.logs.get_mut(&index) {
+            log.reject.insert(peer_id);
+        }
     }
 }
 
