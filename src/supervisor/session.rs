@@ -18,7 +18,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, ToSocketAddrs};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use torrent::{HashId, TorrentInfo};
@@ -161,12 +161,12 @@ impl TorrentSessionBuilder {
             tracker: Arc::new(tracker),
             peers: Arc::new(RwLock::new(vec![])),
             info_hash: Arc::new(info_hash),
-            metadata_pm: Arc::new(Mutex::new(metadata_cache)),
+            metadata_pm: Arc::new(RwLock::new(metadata_cache)),
             handshake_template: Arc::new(handshake_template),
             torrent: Arc::new(RwLock::new(torrent)),
             peer_conn_req_tx,
             peer_piece_req_tx,
-            piece_manager: Arc::new(Mutex::new(pm)),
+            piece_manager: Arc::new(RwLock::new(pm)),
             piece_log_man: Arc::new(RwLock::new(piece_log_man)),
             metadata_log_man: Arc::new(RwLock::new(metadata_log_man)),
             long_term_tasks: Default::default(),
@@ -224,8 +224,8 @@ pub struct TorrentSession {
     handshake_template: Arc<BTHandshake>,
     long_term_tasks: Arc<RwLock<JoinSet<()>>>,
     short_term_tasks: Arc<RwLock<JoinSet<()>>>,
-    piece_manager: Arc<Mutex<PieceManager>>,
-    metadata_pm: Arc<Mutex<PieceManager>>,
+    piece_manager: Arc<RwLock<PieceManager>>,
+    metadata_pm: Arc<RwLock<PieceManager>>,
     piece_log_man: Arc<RwLock<PieceLogManager>>,
     metadata_log_man: Arc<RwLock<PieceLogManager>>,
 
@@ -334,7 +334,7 @@ impl TorrentSession {
             return Err(Error::Generic("duplicate peer".into()));
         }
         {
-            let pm = self.piece_manager.lock().await;
+            let pm = self.piece_manager.read().await;
             if !pm.checked_bits().is_empty() {
                 peer.send_message_now(BTMessage::BitField(pm.checked_bits().to_bytes()))
                     .await?;
@@ -481,7 +481,7 @@ impl TorrentSession {
                 let index = *index as usize;
                 let mut state = peer.state.write().await;
                 if state.owned_pieces.is_empty() {
-                    let num = self.piece_manager.lock().await.piece_num();
+                    let num = self.piece_manager.read().await.piece_num();
                     state.owned_pieces = bit_vec::BitVec::from_elem(num, false)
                 }
                 if index < state.owned_pieces.len() {
@@ -492,7 +492,7 @@ impl TorrentSession {
             BTMessage::BitField(bits) => {
                 let mut state = peer.state.write().await;
                 let mut bits = bit_vec::BitVec::from_bytes(bits);
-                let piece_num = { self.piece_manager.lock().await.piece_num() };
+                let piece_num = { self.piece_manager.read().await.piece_num() };
 
                 bits.truncate(piece_num);
 
@@ -538,7 +538,7 @@ impl TorrentSession {
         };
 
         if let Some(piece) = complete_piece {
-            let mut pm = self.piece_manager.lock().await;
+            let mut pm = self.piece_manager.write().await;
             pm.write(piece)?;
             let checked = pm.check(index, &sha1)?;
             all_checked = pm.all_checked();
@@ -590,7 +590,7 @@ impl TorrentSession {
 
                 let msg: UTMetadataMessage = {
                     let index = *index;
-                    let mut metadata_pm = self.metadata_pm.lock().await;
+                    let mut metadata_pm = self.metadata_pm.write().await;
                     let total_size = metadata_pm.total_size();
 
                     if metadata_pm.is_checked(index) {
@@ -623,7 +623,7 @@ impl TorrentSession {
                 };
                 let index = piece.index();
                 let sha1 = piece.sha1();
-                let mut metadata_pm = self.metadata_pm.lock().await;
+                let mut metadata_pm = self.metadata_pm.write().await;
                 // TODO: handle error
                 metadata_pm.write(piece)?;
                 let checked = metadata_pm.check(index, &sha1)?;
@@ -655,7 +655,7 @@ impl TorrentSession {
 
             if !self.info_hash.is_same(&computed_info_hash) {
                 debug!("info hash not match");
-                let mut metadata_pm = self.metadata_pm.lock().await;
+                let mut metadata_pm = self.metadata_pm.write().await;
                 metadata_pm.clear_all_checked_bits()?;
                 return Ok(());
             }
@@ -669,7 +669,7 @@ impl TorrentSession {
             let piece_len = info.piece_length;
             {
                 debug!(?total_len, ?piece_len, "construct pieces");
-                let mut cache = self.piece_manager.lock().await;
+                let mut cache = self.piece_manager.write().await;
                 *cache = PieceManager::from_torrent_info(self.storage_dir.as_ref(), &info)?;
 
                 let mut log_man = self.piece_log_man.write().await;
@@ -689,7 +689,7 @@ impl TorrentSession {
     async fn handle_req_metadata(&self, peer: &Peer) -> Result<()> {
         // bep-009
 
-        let mut metadata_pm = self.metadata_pm.lock().await;
+        let mut metadata_pm = self.metadata_pm.write().await;
 
         if metadata_pm.total_size() == 0 {
             if let Some(total_len) = peer
@@ -714,7 +714,7 @@ impl TorrentSession {
         let piece_info = {
             let mut metadata_log_man = self.metadata_log_man.write().await;
             metadata_log_man.sync(&mut metadata_pm)?;
-            metadata_log_man.pull(Arc::clone(&peer.peer_id))
+            metadata_log_man.pull(&peer.peer_id)
         };
 
         let msg_id = peer
@@ -777,7 +777,7 @@ impl TorrentSession {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 {
                     let mut log_man = self.piece_log_man.write().await;
-                    let mut pm = self.piece_manager.lock().await;
+                    let mut pm = self.piece_manager.write().await;
                     log_man.sync(&mut pm)?;
                 }
                 let mut broken_peers = vec![];
@@ -896,7 +896,7 @@ impl TorrentSession {
             loop {
                 while let Some((peer, info)) = peer_req_rx.recv().await {
                     {
-                        let mut pm = self.piece_manager.lock().await;
+                        let mut pm = self.piece_manager.write().await;
                         let index = info.index;
                         if pm.is_checked(index) {
                             let piece = pm.fetch(index)?;
@@ -984,7 +984,7 @@ impl TorrentSession {
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     pub async fn start(&self) -> Result<()> {
         {
-            let pm = self.piece_manager.lock().await;
+            let pm = self.piece_manager.read().await;
             let checked_num = (0..pm.piece_num()).filter(|&i| pm.is_checked(i)).count();
             debug!(piece_num=?pm.piece_num(), ?checked_num)
         }
@@ -1003,7 +1003,7 @@ impl TorrentSession {
             }
         }
         {
-            let mut pm = self.piece_manager.lock().await;
+            let mut pm = self.piece_manager.write().await;
             pm.flush()?;
         }
         self.status.store(Status::Stopped as u32, Ordering::Release);
@@ -1031,7 +1031,7 @@ impl TorrentSession {
             while long_term.join_next().await.is_some() {}
         }
         {
-            let mut cache = self.piece_manager.lock().await;
+            let mut cache = self.piece_manager.write().await;
             if let Err(err) = cache.flush() {
                 error!(?err)
             }
@@ -1039,7 +1039,7 @@ impl TorrentSession {
         Ok(())
     }
 
-    pub fn piece_manager(&self) -> Arc<Mutex<PieceManager>> {
+    pub fn piece_manager(&self) -> Arc<RwLock<PieceManager>> {
         Arc::clone(&self.piece_manager)
     }
 
