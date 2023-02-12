@@ -20,6 +20,8 @@ pub struct PeerState {
     pub broken: Option<String>,
     pub choke: bool,
     pub interested: bool,
+    // the pieces that current peer reported. if peer haven't reported it, the length is 0,
+    // otherwise the length is the number of pieces
     pub owned_pieces: bit_vec::BitVec,
 }
 

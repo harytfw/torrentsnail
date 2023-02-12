@@ -573,9 +573,8 @@ impl PieceManager {
         match data {
             Ok(data) => {
                 let mut tmp = BitVec::from_bytes(&data);
-                while tmp.len() > bit_len {
-                    tmp.pop();
-                }
+                tmp.truncate(bit_len);
+
                 if tmp.len() == bit_len {
                     Some(tmp)
                 } else {
@@ -652,6 +651,7 @@ pub struct PieceLogManager {
     fragment_len: usize,
     adaptive_speed: HashMap<HashId, SpeedRecord>,
     sync_adaptive_at: Instant,
+    peer_owned_pieces: HashMap<HashId, BitVec>,
 }
 
 impl PieceLogManager {
@@ -663,12 +663,14 @@ impl PieceLogManager {
             fragment_len: 16 << 10,
             adaptive_speed: HashMap::default(),
             sync_adaptive_at: Instant::now(),
+            peer_owned_pieces: HashMap::default(),
         }
     }
 
     fn clear(&mut self) {
         self.logs.clear();
         self.adaptive_speed.clear();
+        self.peer_owned_pieces.clear();
     }
 
     pub fn sync(&mut self, pm: &mut PieceManager) -> Result<()> {
@@ -707,6 +709,13 @@ impl PieceLogManager {
         Ok(())
     }
 
+    pub fn sync_peer_pieces(&mut self, peer_id: &HashId, pieces: &BitVec) -> Result<()> {
+        if !pieces.is_empty() {
+            self.peer_owned_pieces.insert(*peer_id, pieces.clone());
+        }
+        Ok(())
+    }
+
     fn sync_adaptive_max_req(&mut self) {
         const STEP: usize = 128 << 10;
         if self.sync_adaptive_at.elapsed() < Duration::from_secs(1) {
@@ -729,11 +738,11 @@ impl PieceLogManager {
     }
 
     pub fn pull(&mut self, peer_id: &HashId) -> Vec<PieceInfo> {
-        if self.all_checked {
-            return vec![];
-        }
-
         let mut ret = vec![];
+
+        if self.all_checked {
+            return ret;
+        }
 
         let req_record = self
             .adaptive_speed
@@ -746,10 +755,20 @@ impl PieceLogManager {
                 break;
             }
 
-            let mut skip =
+            let have_this_piece = self
+                .peer_owned_pieces
+                .get(peer_id)
+                .and_then(|owned| owned.get(log.index))
+                .unwrap_or(true);
+
+            let not_timeout =
                 matches!(log.peer, Some((_, at)) if at.elapsed() < Duration::from_secs(15));
-            skip |= log.reject.find(|id| id == peer_id).is_some();
-            if !skip {
+
+            let reject = log.reject.find(|id| id == peer_id).is_some();
+
+            let ok = !reject && not_timeout && have_this_piece;
+
+            if ok {
                 log.peer = Some((*peer_id, Instant::now()));
                 let len = cmp::min(log.bits.len() - log.offset, self.fragment_len);
                 ret.push(PieceInfo::new(log.index, log.offset, len));

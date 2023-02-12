@@ -489,9 +489,23 @@ impl TorrentSession {
                 }
             }
             BTMessage::Cancel(_info) => {}
-            BTMessage::BitField(fields) => {
+            BTMessage::BitField(bits) => {
                 let mut state = peer.state.write().await;
-                state.owned_pieces = bit_vec::BitVec::from_bytes(fields);
+                let mut bits = bit_vec::BitVec::from_bytes(bits);
+                let piece_num = { self.piece_manager.lock().await.piece_num() };
+
+                bits.truncate(piece_num);
+
+                if bits.len() == piece_num {
+                    state.owned_pieces = bits;
+                } else {
+                    debug!(
+                        "peer send wrong BitField, incoming bits len: {}, expected len: {}",
+                        bits.len(),
+                        piece_num
+                    );
+                    // FIXME: peer send wrong BitField messages, we should terminate connection
+                }
             }
             BTMessage::Ping => {
                 peer.send_message_now(BTMessage::Ping).await?;
@@ -770,6 +784,11 @@ impl TorrentSession {
                 let peers = { self.peers.read().await.clone() };
 
                 for peer in peers {
+                    {
+                        let state = peer.state.read().await;
+                        let mut log_man = self.piece_log_man.write().await;
+                        log_man.sync_peer_pieces(&peer.peer_id, &state.owned_pieces)?;
+                    }
                     self.handle_peer(&peer).await?;
                     let broken = { peer.state.read().await.broken.clone() };
                     if let Some(reason) = broken {
