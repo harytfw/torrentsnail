@@ -9,7 +9,7 @@ use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
 use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use torrent::{HashId, TorrentInfo};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, instrument, warn};
 
 const MSG_UT_METADATA: &str = "ut_metadata";
 const METADATA_PIECE_SIZE: usize = 16384;
@@ -113,7 +113,9 @@ impl TorrentSessionBuilder {
 
         let temp_dir = std::env::temp_dir();
         let storage_dir: PathBuf = self.storage_dir.unwrap_or_else(|| temp_dir.join("snail"));
-        let torrent_path = self.torrent_path.unwrap_or_else(|| temp_dir.join("snail"));
+        let torrent_path = self
+            .torrent_path
+            .unwrap_or_else(|| temp_dir.join("snail/tmp.torrent"));
 
         if torrent_path.try_exists().unwrap() {
             let torrent_file = TorrentFile::from_path(&torrent_path)?;
@@ -234,6 +236,7 @@ pub struct TorrentSession {
 }
 
 impl TorrentSession {
+    #[instrument(skip_all, fields(info_hash=?self.info_hash))]
     pub async fn passive_handshake(
         &self,
         peer_handshake: BTHandshake,
@@ -249,7 +252,8 @@ impl TorrentSession {
         Ok(peer)
     }
 
-    async fn active_handshake(&self, mut tcp: TcpStream) -> Result<Peer> {
+    #[instrument(skip_all, fields(info_hash=?self.info_hash))]
+    pub async fn active_handshake(&self, mut tcp: TcpStream) -> Result<Peer> {
         tcp.write_all(&self.handshake_template.to_bytes()).await?;
 
         let peer_handshake = BTHandshake::from_reader_async(&mut tcp).await?;
@@ -342,6 +346,7 @@ impl TorrentSession {
         Ok(peer)
     }
 
+    #[instrument(skip_all)]
     async fn announce_tracker_event(&self, event: tracker::Event) -> Result<()> {
         let mut short_term = self.short_term_tasks.write().await;
         short_term.spawn(self.clone().announce_tracker_event_inner(event));
@@ -402,6 +407,7 @@ impl TorrentSession {
         }
     }
 
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     async fn tick_announce(self) {
         let t = async {
             loop {
@@ -413,8 +419,6 @@ impl TorrentSession {
                     m
                 };
                 let peers = self.bt().dht.get_peers(&self.info_hash).await;
-
-                debug!(info_hash = ?self.info_hash, peers = ?peers," get peers");
 
                 'inner: for addr in peers {
                     if exists_peers.contains(&addr) {
@@ -433,6 +437,7 @@ impl TorrentSession {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             }
         };
+
         tokio::select! {
             r = t => {
                 let r: Result<()> = r;
@@ -445,6 +450,7 @@ impl TorrentSession {
         }
     }
 
+    #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
     async fn handle_message(&self, peer: &Peer, msg: &BTMessage) -> Result<()> {
         match msg {
             BTMessage::Choke => {
@@ -727,6 +733,7 @@ impl TorrentSession {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
     async fn handle_peer(&self, peer: &Peer) -> Result<()> {
         let torrent_exists = { self.torrent.read().await.is_some() };
 
@@ -741,7 +748,6 @@ impl TorrentSession {
             let mut log_man = self.piece_log_man.write().await;
             log_man.pull(Arc::clone(&peer.peer_id))
         };
-        debug!(len = ?pending_piece_info.len(), "pending piece");
 
         if state.choke {
             if !pending_piece_info.is_empty() {
@@ -763,6 +769,7 @@ impl TorrentSession {
         Ok(())
     }
 
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     async fn tick_check_peer(self) {
         let t = async {
             loop {
@@ -821,6 +828,7 @@ impl TorrentSession {
         }
     }
 
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     async fn tick_connect_peer(self, mut rx: mpsc::Receiver<SocketAddr>) {
         let t = async {
             loop {
@@ -834,7 +842,6 @@ impl TorrentSession {
                 }
             }
         };
-
         tokio::select! {
             r = t => {
                 let r: Result<()> = r;
@@ -847,6 +854,8 @@ impl TorrentSession {
             }
         }
     }
+
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     async fn tick_peer_message(self, peer: Peer, mut bt_msg_rx: mpsc::Receiver<BTMessage>) {
         let t = async {
             loop {
@@ -875,6 +884,7 @@ impl TorrentSession {
         }
     }
 
+    #[instrument(skip_all, fields(info_hash=?self.info_hash))]
     async fn tick_peer_req(self, mut peer_req_rx: mpsc::Receiver<(Peer, PieceInfo)>) {
         let t = async {
             loop {
@@ -889,6 +899,7 @@ impl TorrentSession {
                                 info.begin,
                                 &piece.buf()[info.begin..info.begin + info.length],
                             );
+
                             peer.send_message_now(BTMessage::from(piece_data)).await?;
                         }
                     }
@@ -907,6 +918,7 @@ impl TorrentSession {
         }
     }
 
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     async fn tick_consume_short_term(self) {
         use tokio::time::sleep;
         'next_round: loop {
@@ -952,6 +964,7 @@ impl TorrentSession {
         }
     }
 
+    #[instrument(skip_all)]
     pub async fn add_peer_with_addr(&self, addr: impl ToSocketAddrs) -> Result<Peer> {
         let tcp = TcpStream::connect(addr).await?;
         debug!(local_addr =?tcp.local_addr(), peer_addr = ?tcp.peer_addr(), "manually add peer");
@@ -962,6 +975,7 @@ impl TorrentSession {
         Status::from_u32(self.status.load(Ordering::Acquire)).unwrap()
     }
 
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     pub async fn start(&self) -> Result<()> {
         {
             let pm = self.piece_manager.lock().await;
@@ -974,6 +988,7 @@ impl TorrentSession {
         Ok(())
     }
 
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     pub async fn stop(&self) -> Result<()> {
         self.announce_tracker_event(tracker::Event::Stopped).await?;
         {
@@ -986,15 +1001,18 @@ impl TorrentSession {
             pm.flush()?;
         }
         self.status.store(Status::Stopped as u32, Ordering::Release);
+
         Ok(())
     }
 
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     pub async fn delete(&self) -> Result<()> {
         self.stop().await?;
         self.cancel.cancel();
         Ok(())
     }
 
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     pub async fn shutdown(&self) -> Result<()> {
         self.stop().await?;
         self.cancel.cancel();

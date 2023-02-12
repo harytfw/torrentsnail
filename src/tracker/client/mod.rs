@@ -5,10 +5,10 @@ pub use super::types;
 use super::types::AnnounceRequest;
 use crate::Result;
 pub use http::TrackerHttpClient;
-use std::{net::SocketAddr, time::Instant};
+use std::{time::Instant};
 use std::{sync::Arc, time::Duration};
-use tokio::{net::UdpSocket, sync::mpsc};
-use tracing::{debug, error};
+use tokio::{sync::mpsc};
+use tracing::{error};
 pub use udp::TrackerUdpClient;
 
 #[derive(Debug, Clone, Default)]
@@ -115,7 +115,7 @@ impl TrackerClient {
         Ok(())
     }
 
-    pub async fn remove_tracker(&self, tracker: &str) -> Result<()> {
+    pub async fn remove_tracker(&self, _tracker: &str) -> Result<()> {
         todo!()
     }
 

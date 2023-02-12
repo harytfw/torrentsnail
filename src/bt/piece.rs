@@ -639,19 +639,13 @@ fn shuffle_slice<T>(mut slice: &mut [T]) {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct SpeedRecord {
     max_req_bytes: usize,
     req_bytes: usize,
 }
 
-impl Default for SpeedRecord {
-    fn default() -> Self {
-        Self {
-            max_req_bytes: 0,
-            req_bytes: 0,
-        }
-    }
-}
+
 
 pub struct PieceLogManager {
     max_req: usize,

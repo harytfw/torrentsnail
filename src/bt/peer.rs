@@ -3,7 +3,7 @@ use crate::bt::{
     Error, Result,
 };
 use crate::torrent::HashId;
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::{io::AsyncWriteExt, sync::mpsc, sync::RwLock};
 use tokio::{
     net::{

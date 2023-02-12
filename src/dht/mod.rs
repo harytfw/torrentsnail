@@ -6,6 +6,7 @@ use crate::{Error, Result};
 use bucket::BucketStats;
 use rand::random;
 use serde::Serialize;
+use tracing::instrument;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
@@ -222,6 +223,7 @@ impl DHTInner {
         }
     }
 
+    #[instrument(skip(self))]
     async fn new_node(&mut self, addr: &SocketAddr, id: &HashId) -> Result<()> {
         if id == self.my_id.as_ref() || addr.ip().is_loopback() {
             return Ok(());
@@ -295,6 +297,7 @@ impl DHTInner {
         target
     }
 
+    #[instrument(level="Debug", skip_all, fields(addr=?packet.1))]
     pub async fn on_packet(&mut self, packet: (Vec<u8>, SocketAddr)) -> Result<()> {
         let (buf, addr) = packet;
 
@@ -600,7 +603,6 @@ impl DHTInner {
     }
 
     async fn on_tick(&mut self) -> Result<()> {
-        debug!("dht on tick");
         self.do_ping_tick().await?;
         self.do_find_node_tick().await?;
         self.do_search_tick().await?;
@@ -608,6 +610,7 @@ impl DHTInner {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     async fn do_ping_tick(&mut self) -> Result<()> {
         let mut ping_addr = vec![];
         for bucket in self.buckets.iter_mut() {
@@ -636,6 +639,7 @@ impl DHTInner {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     async fn do_find_node_tick(&mut self) -> Result<()> {
         let find_node = match self.last_new_node_at.elapsed() {
             Ok(dur) => dur > Duration::from_secs(15),
@@ -658,6 +662,7 @@ impl DHTInner {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     async fn do_search_tick(&mut self) -> Result<()> {
         let mut pending_search: Vec<(SocketAddr, [u8; 4], HashId)> = vec![];
         let mut max_concurrent_search_cnt = 10;

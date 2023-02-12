@@ -3,7 +3,7 @@ use crate::Result;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 #[derive(Clone)]
 pub struct LSD {
@@ -21,8 +21,9 @@ impl LSD {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn announce(&self, info_hash: &HashId) -> Result<()> {
-        debug!(info_hash = ?info_hash, "announce lsd");
+        debug!("announce lsd");
         let buf = self.build_packet(info_hash);
         self.sock.send_to(&buf, "239.192.152.143:6771").await?;
         Ok(())

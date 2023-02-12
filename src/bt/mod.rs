@@ -7,7 +7,7 @@ use tokio::{
     sync::RwLock,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, error, span, Instrument, Level};
+use tracing::{debug, debug_span, error, instrument, Instrument};
 pub mod peer;
 pub mod session;
 pub mod types;
@@ -16,7 +16,6 @@ use crate::{
     dht::DHT,
     lsd::LSD,
     torrent::{HashId, TorrentFile},
-    tracker::TrackerClient,
 };
 use session::TorrentSession;
 pub mod piece;
@@ -151,15 +150,8 @@ impl BT {
         }
     }
 
+    #[instrument(skip_all, fields(local=?tcp.local_addr(),remote=?tcp.peer_addr()))]
     async fn perform_handshake(self: Arc<Self>, mut tcp: TcpStream) {
-        let addr = match tcp.peer_addr() {
-            Ok(addr) => addr,
-            Err(err) => {
-                error!(?err, "no peer addr");
-                return;
-            }
-        };
-
         let handshake = match BTHandshake::from_reader_async(&mut tcp).await {
             Ok(s) => s,
             Err(err) => {
@@ -168,33 +160,25 @@ impl BT {
             }
         };
 
-        let span =
-            span!(Level::DEBUG, "check handshake", info_hash =?handshake.info_hash, addr = ?addr);
+        let session = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .find(|t| t.info_hash.as_ref() == &handshake.info_hash)
+            .cloned();
 
-        async {
-            let torrent = self
-                .sessions
-                .read()
-                .await
-                .iter()
-                .find(|t| t.info_hash.as_ref() == &handshake.info_hash)
-                .cloned();
-
-            if let Some(torrent) = torrent {
-                debug!("passive handshake");
-                if let Err(e) = torrent.passive_handshake(handshake, tcp).await {
-                    error!(err = ?e);
-                };
-                return;
-            }
-
-            debug!("torrent session not found");
-            if let Err(e) = tcp.shutdown().await {
+        if let Some(session) = session {
+            if let Err(e) = session.passive_handshake(handshake, tcp).await {
                 error!(err = ?e);
-            }
+            };
+            return;
         }
-        .instrument(span)
-        .await;
+
+        debug!("torrent session not found");
+        if let Err(e) = tcp.shutdown().await {
+            error!(err = ?e);
+        }
     }
 
     fn load_id() -> Result<HashId> {
