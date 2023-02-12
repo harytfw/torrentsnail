@@ -667,10 +667,9 @@ impl PieceLogManager {
         }
     }
 
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         self.logs.clear();
         self.adaptive_speed.clear();
-        self.all_checked = false;
     }
 
     pub fn sync(&mut self, pm: &mut PieceManager) -> Result<()> {
@@ -778,7 +777,7 @@ impl PieceLogManager {
         }
 
         let complete = if let Some(log) = self.logs.get_mut(&index) {
-            let end = begin + buf.len();
+            let end = cmp::min(begin + buf.len(), log.buf.len());
             log.buf[begin..end].copy_from_slice(buf);
             for i in begin..end {
                 log.bits.set(i, true);
