@@ -7,7 +7,6 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{cmp, fs, io};
 use tracing::{debug, error};
@@ -601,11 +600,11 @@ impl PieceManager {
 
 struct PieceLog {
     index: usize,
-    peer: Option<(Arc<HashId>, Instant)>,
+    peer: Option<(HashId, Instant)>,
     offset: usize,
     bits: BitVec,
     buf: Vec<u8>,
-    reject: uluru::LRUCache<Arc<HashId>, 20>,
+    reject: uluru::LRUCache<HashId, 20>,
 }
 
 impl Debug for PieceLog {
@@ -651,7 +650,7 @@ pub struct PieceLogManager {
     logs: HashMap<usize, PieceLog>,
     all_checked: bool,
     fragment_len: usize,
-    adaptive_speed: HashMap<Arc<HashId>, SpeedRecord>,
+    adaptive_speed: HashMap<HashId, SpeedRecord>,
     sync_adaptive_at: Instant,
 }
 
@@ -729,7 +728,7 @@ impl PieceLogManager {
         }
     }
 
-    pub fn pull(&mut self, peer_id: Arc<HashId>) -> Vec<PieceInfo> {
+    pub fn pull(&mut self, peer_id: &HashId) -> Vec<PieceInfo> {
         if self.all_checked {
             return vec![];
         }
@@ -738,7 +737,7 @@ impl PieceLogManager {
 
         let req_record = self
             .adaptive_speed
-            .entry(Arc::clone(&peer_id))
+            .entry(*peer_id)
             .or_insert_with(Default::default);
 
         for log in self.logs.values_mut() {
@@ -749,9 +748,9 @@ impl PieceLogManager {
 
             let mut skip =
                 matches!(log.peer, Some((_, at)) if at.elapsed() < Duration::from_secs(15));
-            skip |= log.reject.find(|id| id == &peer_id).is_some();
+            skip |= log.reject.find(|id| id == peer_id).is_some();
             if !skip {
-                log.peer = Some((Arc::clone(&peer_id), Instant::now()));
+                log.peer = Some((*peer_id, Instant::now()));
                 let len = cmp::min(log.bits.len() - log.offset, self.fragment_len);
                 ret.push(PieceInfo::new(log.index, log.offset, len));
                 req_record.req_bytes += len
@@ -766,7 +765,7 @@ impl PieceLogManager {
         index: usize,
         begin: usize,
         buf: &[u8],
-        peer_id: Arc<HashId>,
+        peer_id: &HashId,
     ) -> Option<Piece> {
         if self.all_checked {
             return None;
@@ -809,9 +808,9 @@ impl PieceLogManager {
         self.logs.keys().copied().collect()
     }
 
-    pub fn on_reject(&mut self, index: usize, peer_id: Arc<HashId>) {
+    pub fn on_reject(&mut self, index: usize, peer_id: &HashId) {
         if let Some(log) = self.logs.get_mut(&index) {
-            log.reject.insert(peer_id);
+            log.reject.insert(*peer_id);
         }
     }
 }
@@ -1009,7 +1008,7 @@ mod tests {
 
     #[test]
     fn piece_log_man() -> Result<()> {
-        let peer_id = Arc::new(HashId::ZERO_V1);
+        let peer_id = HashId::ZERO_V1;
 
         let mut plm = PieceLogManager::new();
         plm.clear();
@@ -1020,17 +1019,17 @@ mod tests {
 
         plm.sync(&mut pm)?;
 
-        assert!(!plm.pull(peer_id.clone()).is_empty());
-        assert!(plm.pull(peer_id.clone()).is_empty());
+        assert!(!plm.pull(&peer_id).is_empty());
+        assert!(plm.pull(&peer_id).is_empty());
 
         plm.clear();
         plm.sync(&mut pm)?;
 
-        assert!(!plm.pull(peer_id.clone()).is_empty());
+        assert!(!plm.pull(&peer_id).is_empty());
 
         for piece in pieces {
             let ret_piece = plm
-                .on_piece_data(piece.index, 0, piece.buf(), Arc::clone(&peer_id))
+                .on_piece_data(piece.index, 0, piece.buf(), &peer_id)
                 .unwrap();
             pm.write(ret_piece)?;
             assert!(pm.check(piece.index, torrent.info.get_piece_sha1(piece.index))?);

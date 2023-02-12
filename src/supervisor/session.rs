@@ -520,12 +520,7 @@ impl TorrentSession {
 
         let complete_piece = {
             let mut log_man = self.piece_log_man.write().await;
-            log_man.on_piece_data(
-                data.index,
-                data.begin,
-                &data.fragment,
-                Arc::clone(&peer.peer_id),
-            )
+            log_man.on_piece_data(data.index, data.begin, &data.fragment, &peer.peer_id)
         };
 
         if let Some(piece) = complete_piece {
@@ -602,19 +597,14 @@ impl TorrentSession {
 
             UTMetadataMessage::Reject(index) => {
                 let mut plm = self.metadata_log_man.write().await;
-                plm.on_reject(*index, Arc::clone(&peer.peer_id))
+                plm.on_reject(*index, &peer.peer_id)
             }
 
             UTMetadataMessage::Data(piece_data) => {
                 let piece = {
                     let mut log_man = self.metadata_log_man.write().await;
                     log_man
-                        .on_piece_data(
-                            piece_data.piece,
-                            0,
-                            &piece_data.payload,
-                            Arc::clone(&peer.peer_id),
-                        )
+                        .on_piece_data(piece_data.piece, 0, &piece_data.payload, &peer.peer_id)
                         .unwrap()
                 };
                 let index = piece.index();
@@ -743,7 +733,7 @@ impl TorrentSession {
 
         let pending_piece_info = {
             let mut log_man = self.piece_log_man.write().await;
-            log_man.pull(Arc::clone(&peer.peer_id))
+            log_man.pull(&peer.peer_id)
         };
 
         if state.choke {
