@@ -22,7 +22,7 @@ pub mod piece;
 pub const MAX_FRAGMENT_LENGTH: usize = 16 << 10;
 
 #[derive(Clone)]
-pub struct BT {
+pub struct TorrentSupervisor {
     pub my_id: Arc<HashId>,
     pub listen_addr: Arc<SocketAddr>,
     dht: DHT,
@@ -31,7 +31,7 @@ pub struct BT {
     cancel: CancellationToken,
 }
 
-impl BT {
+impl TorrentSupervisor {
     pub async fn start() -> Result<Arc<Self>> {
         let listen_addr: Arc<SocketAddr> = Arc::new("0.0.0.0:8081".parse()?);
 

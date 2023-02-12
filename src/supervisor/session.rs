@@ -1,10 +1,10 @@
-use crate::bt::peer::Peer;
-use crate::bt::piece::{PieceLogManager, PieceManager};
-use crate::bt::types::{
+use crate::supervisor::peer::Peer;
+use crate::supervisor::piece::{PieceLogManager, PieceManager};
+use crate::supervisor::types::{
     BTExtMessage, BTHandshake, BTMessage, PieceData, PieceInfo, UTMetadataMessage,
     UTMetadataPieceData,
 };
-use crate::bt::BT;
+use crate::supervisor::TorrentSupervisor;
 use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
 use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
@@ -33,7 +33,7 @@ pub struct TorrentSessionBuilder {
     torrent_path: Option<PathBuf>,
     torrent: Option<TorrentFile>,
     storage_dir: Option<PathBuf>,
-    bt: Option<Weak<BT>>,
+    bt: Option<Weak<TorrentSupervisor>>,
     check_files: bool,
 }
 
@@ -42,7 +42,7 @@ impl TorrentSessionBuilder {
         Self::default()
     }
 
-    pub fn with_bt(self, bt: Weak<BT>) -> Self {
+    pub fn with_bt(self, bt: Weak<TorrentSupervisor>) -> Self {
         Self {
             bt: Some(bt),
             ..self
@@ -218,7 +218,7 @@ pub struct TorrentSession {
     pub torrent: Arc<RwLock<Option<TorrentFile>>>,
     storage_dir: Arc<PathBuf>,
 
-    bt_weak: Weak<BT>,
+    bt_weak: Weak<TorrentSupervisor>,
     tracker: Arc<TrackerClient>,
     peers: Arc<RwLock<Vec<Peer>>>,
     handshake_template: Arc<BTHandshake>,
@@ -287,7 +287,7 @@ impl TorrentSession {
         long_term.spawn(self.clone().tick_consume_short_term());
     }
 
-    fn bt(&self) -> Arc<BT> {
+    fn bt(&self) -> Arc<TorrentSupervisor> {
         self.bt_weak.upgrade().expect("bt is destroyed")
     }
 

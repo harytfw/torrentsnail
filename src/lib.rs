@@ -1,5 +1,5 @@
 pub mod bencode;
-pub mod bt;
+pub mod supervisor;
 pub mod dht;
 mod error;
 pub mod lsd;

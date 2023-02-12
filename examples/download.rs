@@ -1,8 +1,6 @@
-
-
 use anyhow::Result;
-use torrentsnail::{bt::BT, torrent::HashId};
-use tracing::{error};
+use torrentsnail::{supervisor::TorrentSupervisor, torrent::HashId};
+use tracing::error;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,7 +12,7 @@ async fn main() -> Result<()> {
         .with_line_number(true)
         .init();
 
-    let bt_man = BT::start().await.unwrap();
+    let bt_man = TorrentSupervisor::start().await.unwrap();
     let s = bt_man
         .download_with_info_hash(&HashId::from_hex(
             "08ada5a7a6183aae1e09d831df6748d566095a10",

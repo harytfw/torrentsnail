@@ -1,5 +1,5 @@
 use anyhow::Result;
-use torrentsnail::bt::BT;
+use torrentsnail::supervisor::TorrentSupervisor;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 10)]
 async fn main() -> Result<()> {
@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
         .with_line_number(true)
         .init();
 
-    let bt_man = BT::start().await?;
+    let bt_man = TorrentSupervisor::start().await?;
 
     tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
     bt_man.shutdown().await?;

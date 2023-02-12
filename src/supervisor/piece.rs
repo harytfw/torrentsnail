@@ -1,4 +1,4 @@
-use crate::bt::types::PieceInfo;
+use crate::supervisor::types::PieceInfo;
 use crate::torrent::{HashId, TorrentInfo};
 use crate::{Error, Result};
 use bit_vec::BitVec;
