@@ -95,7 +95,7 @@ impl TorrentSessionBuilder {
         handshake
     }
 
-    pub fn build(mut self) -> Result<TorrentSession> {
+    pub async fn build(mut self) -> Result<TorrentSession> {
         let bt_weak = self.bt.unwrap();
         let bt = bt_weak.upgrade().unwrap();
 
@@ -136,7 +136,7 @@ impl TorrentSessionBuilder {
             if self.check_files {
                 let paths: Vec<PathBuf> = pm.paths().iter().map(|p| p.to_path_buf()).collect();
                 for path in paths {
-                    let pass = pm.check_file(&path, |i| torrent.info.get_piece_sha1(i))?;
+                    let pass = pm.check_file(&path, |i| torrent.info.get_piece_sha1(i)).await?;
                     debug!(?path, ?pass, "check file");
                 }
             }
@@ -541,14 +541,14 @@ impl TorrentSession {
 
         if let Some(piece) = complete_piece {
             let mut pm = self.piece_manager.write().await;
-            pm.write(piece)?;
-            let checked = pm.check(index, &sha1)?;
+            pm.write(piece).await?;
+            let checked = pm.check(index, &sha1).await?;
             all_checked = pm.all_checked();
             if checked {
                 peer.send_message_now(BTMessage::Have(index as u32)).await?;
             }
             if all_checked {
-                pm.flush()?;
+                pm.flush().await?;
             }
         }
         if all_checked {
@@ -596,11 +596,11 @@ impl TorrentSession {
                     let total_size = metadata_pm.total_size();
 
                     if metadata_pm.is_checked(index) {
-                        let piece = metadata_pm.read(index)?;
+                        let piece = metadata_pm.read(index).await?;
                         let piece_data = UTMetadataPieceData {
                             piece: index,
                             total_size,
-                            payload: piece.into_buf(),
+                            payload: piece.buf().to_vec(),
                         };
                         UTMetadataMessage::Data(piece_data)
                     } else {
@@ -627,8 +627,8 @@ impl TorrentSession {
                 let sha1 = piece.sha1();
                 let mut metadata_pm = self.metadata_pm.write().await;
                 // TODO: handle error
-                metadata_pm.write(piece)?;
-                let checked = metadata_pm.check(index, &sha1)?;
+                metadata_pm.write(piece).await?;
+                let checked = metadata_pm.check(index, &sha1).await?;
                 debug!(index, checked);
                 if metadata_pm.all_checked() {
                     {
@@ -637,7 +637,7 @@ impl TorrentSession {
                     }
                     let mut buf = Vec::with_capacity(metadata_pm.total_size());
                     for i in 0..metadata_pm.piece_num() {
-                        let piece = metadata_pm.fetch(i)?;
+                        let piece = metadata_pm.fetch(i).await?;
                         buf.extend(piece.buf())
                     }
                     torrent_metadata_buf = Some(buf);
@@ -901,7 +901,7 @@ impl TorrentSession {
                         let mut pm = self.piece_manager.write().await;
                         let index = info.index;
                         if pm.is_checked(index) {
-                            let piece = pm.fetch(index)?;
+                            let piece = pm.fetch(index).await?;
                             let piece_data = PieceData::new(
                                 index,
                                 info.begin,
@@ -1006,7 +1006,7 @@ impl TorrentSession {
         }
         {
             let mut pm = self.piece_manager.write().await;
-            pm.flush()?;
+            pm.flush().await?;
         }
         self.status.store(Status::Stopped as u32, Ordering::Release);
 
@@ -1034,7 +1034,7 @@ impl TorrentSession {
         }
         {
             let mut cache = self.piece_manager.write().await;
-            if let Err(err) = cache.flush() {
+            if let Err(err) = cache.flush().await {
                 error!(?err)
             }
         }

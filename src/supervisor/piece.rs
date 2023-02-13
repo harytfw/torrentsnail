@@ -2,13 +2,16 @@ use crate::supervisor::types::PieceInfo;
 use crate::torrent::{HashId, TorrentInfo};
 use crate::{Error, Result};
 use bit_vec::BitVec;
+use bytes::BytesMut;
 use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{cmp, fs, io};
+use tokio::task::JoinHandle;
 use tracing::{debug, error};
 
 #[derive(Clone)]
@@ -31,8 +34,11 @@ impl Piece {
         }
     }
 
-    pub fn from_buf(index: usize, buf: Vec<u8>) -> Self {
-        Self { index, buf }
+    pub fn from_buf(index: usize, buf: &[u8]) -> Self {
+        Self {
+            index,
+            buf: buf.to_vec(),
+        }
     }
 
     pub fn sha1(&self) -> [u8; 20] {
@@ -53,10 +59,6 @@ impl Piece {
 
     pub fn index(&self) -> usize {
         self.index
-    }
-
-    pub fn into_buf(self) -> Vec<u8> {
-        self.buf
     }
 }
 
@@ -130,6 +132,11 @@ impl FileFragment {
 
         (left, right)
     }
+
+    fn apply(&self, data: &[u8], piece: &mut Piece) {
+        assert_eq!(self.len, data.len());
+        piece.buf[self.piece_offset..self.piece_offset + self.len].copy_from_slice(data);
+    }
 }
 
 struct FilePieceMap {
@@ -138,7 +145,7 @@ struct FilePieceMap {
     path: PathBuf,
     // the size of complete file
     size: usize,
-    // TODO: use rang to represent used range
+    // TODO: use rang to represent used indices
     piece_indices: HashSet<usize>,
 }
 
@@ -176,7 +183,17 @@ impl FilePieceMap {
         }
     }
 
-    fn write(&self, pieces: &[Piece]) -> Result<()> {
+    fn prepare_write(&self, piece: &Piece) -> Vec<(FileFragment, Vec<u8>)> {
+        let mut frags = vec![];
+
+        if let Some(frag) = self.fragments.iter().find(|f| f.piece_index == piece.index) {
+            let b = piece.buf[frag.piece_offset..frag.piece_offset + frag.len].to_vec();
+            frags.push((frag.clone(), b));
+        }
+        frags
+    }
+
+    fn write(&self, req: (FileFragment, Vec<u8>)) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -186,52 +203,31 @@ impl FilePieceMap {
             .write(true)
             .open(self.path.as_path())?;
 
-        let mut write_cnt = 0usize;
-
-        for piece in pieces {
-            if let Some(frag) = self.fragments.iter().find(|f| f.piece_index == piece.index) {
-                let data = &piece.buf[frag.piece_offset..frag.piece_offset + frag.len];
-                debug!(?frag, "accept piece");
-                f.write_at(data, frag.file_offset as u64)?;
-                write_cnt += 1;
-            }
-        }
-
-        debug!(path = ?self.path, "save data");
-        if write_cnt != pieces.len() {
-            Err(Error::Generic("some file fragments can not accept".into()))
-        } else {
-            Ok(())
-        }
+        let (frag, buf) = req;
+        f.write_at(&buf, frag.file_offset as u64)?;
+        Ok(())
     }
 
-    fn read(&self, pieces: &mut [Piece]) -> Result<()> {
+    fn read(&self, index: usize) -> Result<(FileFragment, Vec<u8>)> {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
 
-        if !self.path.as_path().try_exists()? {
-            return Ok(());
+        let frag = self
+            .fragments
+            .iter()
+            .find(|f| f.piece_index == index)
+            .unwrap();
+
+        if !self.path.try_exists()? {
+            return Ok((frag.clone(), vec![0u8; frag.len]));
         }
 
         let f = fs::File::options().read(true).open(&self.path)?;
 
-        let mut read_cnt = 0usize;
-
-        for piece in pieces.iter_mut() {
-            if let Some(frag) = self.fragments.iter().find(|f| f.piece_index == piece.index) {
-                let buf = &mut piece.buf[frag.piece_offset..frag.piece_offset + frag.len];
-                debug!(?frag, "fill piece");
-                f.read_exact_at(buf, frag.file_offset as u64)?;
-                read_cnt += 1
-            }
-        }
-
-        if read_cnt != pieces.len() {
-            Err(Error::Generic("some file fragments not found".into()))
-        } else {
-            Ok(())
-        }
+        let mut data = vec![0u8; frag.len];
+        f.read_exact_at(&mut data, frag.file_offset as u64)?;
+        Ok((frag.clone(), data))
     }
 
     fn contains_index(&self, index: usize) -> bool {
@@ -320,7 +316,7 @@ pub struct PieceManager {
     first_piece_len: usize,
     piece_num: usize,
     last_piece_len: usize,
-    maps: Vec<FilePieceMap>,
+    maps: Vec<Arc<FilePieceMap>>,
     cache_size: usize,
     checked_bits: BitVec,
     checked_bits_path: PathBuf,
@@ -350,6 +346,7 @@ impl PieceManager {
         }
 
         let maps = builder.build().unwrap();
+        let maps = maps.into_iter().map(|m| Arc::new(m)).collect();
 
         let (piece_num, last_piece_len) = calc_piece_num(info.total_length(), info.piece_length);
 
@@ -382,6 +379,9 @@ impl PieceManager {
 
         let (piece_num, last_piece_len) = calc_piece_num(total_size, piece_len);
 
+        let maps = builder.build().unwrap();
+        let maps = maps.into_iter().map(Arc::new).collect();
+
         let mut cache = Self {
             name: path
                 .as_ref()
@@ -394,7 +394,7 @@ impl PieceManager {
             piece_num,
             last_piece_len,
             cache_size: total_size,
-            maps: builder.build().unwrap(),
+            maps,
             checked_bits: BitVec::from_elem(piece_num, false),
             checked_bits_path: path.as_ref().join(".snail_checked_bits"),
             total_size,
@@ -407,7 +407,7 @@ impl PieceManager {
         Default::default()
     }
 
-    pub fn fetch(&mut self, index: usize) -> Result<&Piece> {
+    pub async fn fetch(&mut self, index: usize) -> Result<&Piece> {
         if self.cache.contains_key(&index) {
             return Ok(self.cache.get_mut(&index).unwrap());
         }
@@ -418,12 +418,32 @@ impl PieceManager {
 
         let piece_len = self.piece_len(index);
         let mut piece = [Piece::new(index, piece_len)];
+        let mut handles = vec![];
+
+        // TODO: avoid unnecessary loop
         for m in self.maps.iter() {
             if m.contains_index(index) {
-                // TODO: fill more piece at once
-                m.read(&mut piece)?;
+                let m_arc = Arc::clone(m);
+                let handle: JoinHandle<Result<(FileFragment, Vec<u8>)>> =
+                    tokio::task::spawn_blocking(move || {
+                        let r = m_arc.read(index)?;
+                        Ok(r)
+                    });
+                handles.push(handle);
             }
         }
+
+        for handle in handles {
+            let ret = handle.await.unwrap()?;
+            let (frag, buf) = ret;
+            // TODO: avoid unnecessary loop
+            for piece in piece.iter_mut() {
+                if piece.index == frag.piece_index {
+                    frag.apply(&buf, piece);
+                }
+            }
+        }
+
         let [piece] = piece;
 
         // self.expire();
@@ -431,16 +451,16 @@ impl PieceManager {
         Ok(self.cache.get_mut(&index).unwrap())
     }
 
-    pub fn write(&mut self, piece: Piece) -> Result<()> {
+    pub async fn write(&mut self, piece: Piece) -> Result<()> {
         self.cache.insert(piece.index, piece);
         if self.cache.len() > 100 {
-            self.flush()?;
+            self.flush().await?;
         }
         Ok(())
     }
 
-    pub fn read(&mut self, index: usize) -> Result<Piece> {
-        self.fetch(index).cloned()
+    pub async fn read(&mut self, index: usize) -> Result<Piece> {
+        self.fetch(index).await.cloned()
     }
 
     pub fn clear_all_checked_bits(&mut self) -> Result<()> {
@@ -462,7 +482,7 @@ impl PieceManager {
         }
     }
 
-    pub fn fix_file_size(&mut self, path: impl AsRef<Path>) -> Result<()> {
+    pub async fn fix_file_size(&mut self, path: impl AsRef<Path>) -> Result<()> {
         if let Some(m) = self.maps.iter().find(|m| m.path == path.as_ref()) {
             let metadata = m.path.metadata()?;
             if metadata.len() as usize > m.size {
@@ -473,8 +493,8 @@ impl PieceManager {
         Ok(())
     }
 
-    pub fn check(&mut self, index: usize, checksum: &[u8]) -> Result<bool> {
-        let piece = self.fetch(index)?;
+    pub async fn check(&mut self, index: usize, checksum: &[u8]) -> Result<bool> {
+        let piece = self.fetch(index).await?;
         let b = match checksum.len() {
             20 => piece.sha1() == checksum,
             32 => piece.sha256() == checksum,
@@ -484,7 +504,7 @@ impl PieceManager {
         Ok(b)
     }
 
-    pub fn check_file<'a>(
+    pub async fn check_file<'a>(
         &mut self,
         path: impl AsRef<Path>,
         checksum_fn: impl Fn(usize) -> &'a [u8],
@@ -498,21 +518,34 @@ impl PieceManager {
         let mut b = true;
         for index in indices {
             self.cache.remove(&index);
-            b &= self.check(index, checksum_fn(index))?;
+            b &= self.check(index, checksum_fn(index)).await?;
         }
         Ok(b)
     }
 
-    pub fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&mut self) -> Result<()> {
         debug!(?self.name, "piece manager flush");
+
+        let mut handles = vec![];
+
+        // TODO: avoid unnecessary loop
         for (_, piece) in self.cache.iter() {
             for m in self.maps.iter() {
                 if m.contains_index(piece.index) {
-                    let slice = std::slice::from_ref(piece);
-                    m.write(slice)?;
+                    let write_reqs = m.prepare_write(piece);
+                    for req in write_reqs {
+                        let m_arc = Arc::clone(m);
+                        let handle = tokio::task::spawn_blocking(move || m_arc.write(req));
+                        handles.push(handle);
+                    }
                 }
             }
         }
+
+        for handle in handles {
+            handle.await.unwrap()?;
+        }
+
         self.save_bits()?;
         self.cache.clear();
         Ok(())
@@ -623,7 +656,7 @@ impl PieceLog {
             peer: None,
             offset: 0,
             bits: BitVec::from_elem(piece_len, false),
-            buf: vec![0u8; piece_len],
+            buf: vec![0; piece_len],
             reject: Default::default(),
         }
     }
@@ -761,14 +794,17 @@ impl PieceLogManager {
                 .and_then(|owned| owned.get(log.index))
                 .unwrap_or(true);
 
-            let not_timeout =
-                matches!(log.peer, Some((_, at)) if at.elapsed() < Duration::from_secs(15));
+            let timeout = match log.peer {
+                Some((_, at)) if at.elapsed() < Duration::from_secs(15) => false,
+                Some(_) => true,
+                _ => true,
+            };
 
             let reject = log.reject.find(|id| id == peer_id).is_some();
 
-            let ok = !reject && not_timeout && have_this_piece;
+            let pick = !reject && !timeout && have_this_piece;
 
-            if ok {
+            if pick {
                 log.peer = Some((*peer_id, Instant::now()));
                 let len = cmp::min(log.bits.len() - log.offset, self.fragment_len);
                 ret.push(PieceInfo::new(log.index, log.offset, len));
@@ -796,7 +832,9 @@ impl PieceLogManager {
 
         let complete = if let Some(log) = self.logs.get_mut(&index) {
             let end = cmp::min(begin + buf.len(), log.buf.len());
+
             log.buf[begin..end].copy_from_slice(buf);
+
             for i in begin..end {
                 log.bits.set(i, true);
             }
@@ -816,7 +854,7 @@ impl PieceLogManager {
         if complete {
             debug!(?index, "complete piece");
             let log = self.logs.get(&index).unwrap();
-            let piece = Piece::from_buf(log.index, log.buf.to_vec());
+            let piece = Piece::from_buf(log.index, &log.buf);
             Some(piece)
         } else {
             None
@@ -876,24 +914,23 @@ mod tests {
         assert_eq!(iter.collect::<Vec<usize>>(), vec![8]);
     }
 
-    #[test]
-    fn empty_piece_manager() -> Result<()> {
+    #[tokio::test]
+    async fn empty_piece_manager() -> Result<()> {
         let mut pm = PieceManager::empty();
 
         assert!(pm.all_checked());
-        assert!(!pm.check(0, &[0])?);
-        assert!(pm.fetch(0).is_err());
+        assert!(pm.check(0, &[0]).await.is_err());
+        assert!(pm.fetch(0).await.is_err());
         assert_eq!(pm.piece_num(), 0);
 
         Ok(())
     }
 
-    #[test]
-    fn piece_manager_single_file() -> Result<()> {
-        let mut pm =
-            PieceManager::from_single_file("/tmp/snail/single_file.torrent", 20242, 16384)?;
+    #[tokio::test]
+    async fn piece_manager_single_file() -> Result<()> {
+        let mut pm = PieceManager::from_single_file("/tmp/snail.torrent", 51413, 16384)?;
         for i in 0..pm.piece_num() {
-            let p = pm.fetch(i)?;
+            let p = pm.fetch(i).await?;
             assert!(p.buf.iter().all(|byte| *byte == 0));
         }
         Ok(())
@@ -926,8 +963,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn piece_manager() -> Result<()> {
+    #[tokio::test]
+    async fn piece_manager() -> Result<()> {
         let torrent_path = setup_test_torrent();
 
         let torrent = TorrentFile::from_path(&torrent_path)?;
@@ -938,12 +975,12 @@ mod tests {
             PieceManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info)?;
 
         for i in 0..pm.piece_num() {
-            let p = pm.read(i)?;
-            pm.write(p)?;
+            let p = pm.read(i).await?;
+            pm.write(p).await?;
         }
 
         for i in 0..pm.piece_num() {
-            assert!(pm.check(i, sha1_fn(i))?);
+            assert!(pm.check(i, sha1_fn(i)).await?);
         }
 
         for i in 0..pm.piece_num() {
@@ -951,13 +988,13 @@ mod tests {
         }
 
         {
-            let origin_piece = pm.read(0)?;
+            let origin_piece = pm.read(0).await?;
             let mut piece = origin_piece.clone();
             piece.buf[0..100].copy_from_slice(&[1; 100]);
-            pm.write(piece)?;
-            assert!(!pm.check(0, sha1_fn(0))?);
-            pm.write(origin_piece)?;
-            assert!(pm.check(0, sha1_fn(0))?);
+            pm.write(piece).await?;
+            assert!(!pm.check(0, sha1_fn(0)).await?);
+            pm.write(origin_piece).await?;
+            assert!(pm.check(0, sha1_fn(0)).await?);
         }
 
         {
@@ -980,7 +1017,7 @@ mod tests {
             }
 
             for p in paths.iter() {
-                assert!(!pm.check_file(p, sha1_fn).unwrap());
+                assert!(!pm.check_file(p, sha1_fn).await.unwrap());
             }
 
             for (p, byte) in paths.iter().zip(first_byte_vec.iter()) {
@@ -993,7 +1030,7 @@ mod tests {
             }
 
             for p in paths.iter() {
-                assert!(pm.check_file(p, sha1_fn).unwrap());
+                assert!(pm.check_file(p, sha1_fn).await.unwrap());
             }
         }
 
@@ -1010,7 +1047,7 @@ mod tests {
             file.write_all(b"12345").unwrap();
             file.flush().unwrap();
             assert_eq!(file.metadata().unwrap().len(), origin_size + 5);
-            pm.fix_file_size(path).unwrap();
+            pm.fix_file_size(path).await.unwrap();
             assert_eq!(file.metadata().unwrap().len(), origin_size);
         }
 
@@ -1025,15 +1062,18 @@ mod tests {
         assert_eq!(log.peer, None);
     }
 
-    #[test]
-    fn piece_log_man() -> Result<()> {
+    #[tokio::test]
+    async fn piece_log_man() -> Result<()> {
         let peer_id = HashId::ZERO_V1;
 
         let mut plm = PieceLogManager::new();
         plm.clear();
 
         let (torrent, mut pm) = setup_piece_manager()?;
-        let pieces: Vec<Piece> = (0..pm.piece_num()).map(|i| pm.read(i).unwrap()).collect();
+        let mut pieces: Vec<Piece> = vec![];
+        for i in 0..pm.piece_num() {
+            pieces.push(pm.read(i).await.unwrap());
+        }
         pm.clear_all_checked_bits()?;
 
         plm.sync(&mut pm)?;
@@ -1050,8 +1090,11 @@ mod tests {
             let ret_piece = plm
                 .on_piece_data(piece.index, 0, piece.buf(), &peer_id)
                 .unwrap();
-            pm.write(ret_piece)?;
-            assert!(pm.check(piece.index, torrent.info.get_piece_sha1(piece.index))?);
+            pm.write(ret_piece).await?;
+            assert!(
+                pm.check(piece.index, torrent.info.get_piece_sha1(piece.index))
+                    .await?
+            );
         }
 
         Ok(())

@@ -78,7 +78,8 @@ impl TorrentSupervisor {
         let ts = TorrentSessionBuilder::new()
             .with_bt(Arc::downgrade(self))
             .with_torrent(torrent)
-            .build()?;
+            .build()
+            .await?;
         sessions.push(ts.clone());
         Ok(ts)
     }
@@ -96,7 +97,8 @@ impl TorrentSupervisor {
         let ts = TorrentSessionBuilder::new()
             .with_bt(Arc::downgrade(self))
             .with_info_hash(*info_hash)
-            .build()?;
+            .build()
+            .await?;
         sessions.push(ts.clone());
         Ok(ts)
     }
