@@ -4,6 +4,7 @@ use std::{
     convert,
     fmt::{Debug, Display},
     ops,
+    sync::Arc,
 };
 
 fn valid_byte(ch: u8) -> bool {
@@ -28,10 +29,6 @@ impl HashId {
 
     pub fn is_zero(&self) -> bool {
         self == &Self::ZERO_V1 || self == &Self::ZERO_V2
-    }
-
-    pub fn is_same(&self, other: &Self) -> bool {
-        self == other
     }
 
     pub fn is_v1(&self) -> bool {
@@ -156,6 +153,18 @@ impl convert::AsRef<[u8]> for HashId {
     }
 }
 
+impl PartialEq<Arc<HashId>> for HashId {
+    fn eq(&self, other: &Arc<HashId>) -> bool {
+        self.eq(other.as_ref())
+    }
+}
+
+impl PartialEq<HashId> for Arc<HashId> {
+    fn eq(&self, other: &HashId) -> bool {
+        other.eq(self)
+    }
+}
+
 impl<'de> de::Deserialize<'de> for HashId {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -193,13 +202,22 @@ impl ser::Serialize for HashId {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_bytes(self.as_ref())
+        serializer.serialize_bytes(self)
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use super::*;
+
+    #[test]
+    pub fn primitive_eq_rc() {
+        let a = HashId::ZERO_V1;
+        let b = Arc::new(HashId::ZERO_V1);
+        let _ = a.eq(&b);
+    }
 
     #[test]
     pub fn hash_id() {
@@ -214,7 +232,7 @@ mod test {
         assert!(v1.is_v1());
         assert!(v2.is_v2());
 
-        assert!(v1.is_same(&v1));
+        assert!(v1 == v1);
     }
 
     #[test]

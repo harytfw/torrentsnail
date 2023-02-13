@@ -71,7 +71,7 @@ impl TorrentSupervisor {
         let info_hash = torrent.info_hash().unwrap();
         let mut sessions = self.sessions.write().await;
         for s in sessions.iter() {
-            if s.info_hash.is_same(&info_hash) {
+            if info_hash == s.info_hash {
                 return Ok(s.clone());
             }
         }
@@ -89,7 +89,7 @@ impl TorrentSupervisor {
     ) -> Result<TorrentSession> {
         let mut sessions = self.sessions.write().await;
         for s in sessions.iter() {
-            if s.info_hash.is_same(info_hash) {
+            if info_hash == &s.info_hash {
                 return Ok(s.clone());
             }
         }

@@ -258,7 +258,7 @@ impl TorrentSession {
 
         let peer_handshake = BTHandshake::from_reader_async(&mut tcp).await?;
 
-        if !self.info_hash.is_same(&peer_handshake.info_hash) {
+        if self.info_hash != peer_handshake.info_hash {
             return Err(Error::Generic(
                 "info hash not match during handshake".into(),
             ));
@@ -324,9 +324,11 @@ impl TorrentSession {
         debug!(peer = ?peer, "attach new peer");
         let mut peers = self.peers.write().await;
 
+        // we only use peer_id to detect duplicate peer.
+        // some peers who behind NAT will got same IP addresses
         let exists = peers
             .iter()
-            .any(|peer| peer.peer_id.is_same(&peer_handshake.peer_id));
+            .any(|peer| peer.peer_id != peer_handshake.peer_id);
         if !exists {
             peers.push(peer.clone());
         } else {
@@ -653,7 +655,7 @@ impl TorrentSession {
                 .unwrap()
             };
 
-            if !self.info_hash.is_same(&computed_info_hash) {
+            if self.info_hash != computed_info_hash {
                 debug!("info hash not match");
                 let mut metadata_pm = self.metadata_pm.write().await;
                 metadata_pm.clear_all_checked_bits()?;
