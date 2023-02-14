@@ -2,7 +2,6 @@ use crate::supervisor::types::PieceInfo;
 use crate::torrent::{HashId, TorrentInfo};
 use crate::{Error, Result};
 use bit_vec::BitVec;
-use bytes::BytesMut;
 use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
@@ -135,6 +134,8 @@ impl FileFragment {
 
     fn apply(&self, data: &[u8], piece: &mut Piece) {
         assert_eq!(self.len, data.len());
+        assert_eq!(self.len, piece.buf.len());
+
         piece.buf[self.piece_offset..self.piece_offset + self.len].copy_from_slice(data);
     }
 }
@@ -346,7 +347,7 @@ impl PieceManager {
         }
 
         let maps = builder.build().unwrap();
-        let maps = maps.into_iter().map(|m| Arc::new(m)).collect();
+        let maps = maps.into_iter().map(Arc::new).collect();
 
         let (piece_num, last_piece_len) = calc_piece_num(info.total_length(), info.piece_length);
 

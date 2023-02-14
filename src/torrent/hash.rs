@@ -103,21 +103,19 @@ impl From<[u8; 20]> for HashId {
     }
 }
 
-impl From<&[u8; 20]> for HashId {
-    fn from(value: &[u8; 20]) -> Self {
-        Self::V1(value.to_owned())
-    }
-}
-
 impl From<[u8; 32]> for HashId {
     fn from(value: [u8; 32]) -> Self {
         Self::V2(value)
     }
 }
 
-impl From<&[u8; 32]> for HashId {
-    fn from(value: &[u8; 32]) -> Self {
-        Self::V2(value.to_owned())
+impl<'a, T> From<&'a T> for HashId
+where
+    HashId: From<T>,
+    T: Clone,
+{
+    fn from(value: &'a T) -> Self {
+        Self::from(value.clone())
     }
 }
 
@@ -228,7 +226,6 @@ mod test {
         let v2 =
             HashId::from_hex("d66919d15e1d90ead86302c9a1ee9ef73b446be261d65b8d8d78c589ae04cdc0")
                 .unwrap();
-
         assert!(v1.is_v1());
         assert!(v2.is_v2());
 
