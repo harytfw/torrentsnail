@@ -2,7 +2,7 @@ use crate::addr::IpAddrBytes;
 use crate::bencode;
 use crate::torrent::HashId;
 use crate::{Error, Result};
-use byteorder::{NetworkEndian, WriteBytesExt};
+use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::{collections::BTreeMap, fmt::Debug};
@@ -97,7 +97,6 @@ impl Debug for BTExtension {
 }
 
 impl BTExtension {
-    
     pub fn new() -> Self {
         Default::default()
     }
@@ -581,6 +580,31 @@ impl UTMetadataMessage {
         };
 
         Ok(msg)
+    }
+}
+
+pub struct LTDontHaveMessage {
+    pub piece: usize,
+}
+
+impl From<(u8, LTDontHaveMessage)> for BTExtMessage {
+    fn from((id, msg): (u8, LTDontHaveMessage)) -> Self {
+        Self::new(id, msg.to_bytes())
+    }
+}
+
+impl LTDontHaveMessage {
+    pub fn new(piece: usize) -> Self {
+        Self { piece }
+    }
+
+    pub fn from_bytes(mut buf: &[u8]) -> Result<Self> {
+        let piece = buf.read_u32::<NetworkEndian>()?;
+        Ok(Self::new(piece as usize))
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        (self.piece as u32).to_be_bytes().to_vec()
     }
 }
 

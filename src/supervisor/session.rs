@@ -24,7 +24,10 @@ use tokio_util::sync::CancellationToken;
 use torrent::{HashId, TorrentInfo};
 use tracing::{debug, error, instrument, warn};
 
+use super::types::LTDontHaveMessage;
+
 const MSG_UT_METADATA: &str = "ut_metadata";
+const MSG_LT_DONTHAVE: &str = "lt_donthave";
 const METADATA_PIECE_SIZE: usize = 16384;
 
 #[derive(Default)]
@@ -136,7 +139,9 @@ impl TorrentSessionBuilder {
             if self.check_files {
                 let paths: Vec<PathBuf> = pm.paths().iter().map(|p| p.to_path_buf()).collect();
                 for path in paths {
-                    let pass = pm.check_file(&path, |i| torrent.info.get_piece_sha1(i)).await?;
+                    let pass = pm
+                        .check_file(&path, |i| torrent.info.get_piece_sha1(i))
+                        .await?;
                     debug!(?path, ?pass, "check file");
                 }
             }
@@ -569,6 +574,13 @@ impl TorrentSession {
                     let metadata_msg = UTMetadataMessage::from_bytes(&ext_msg.payload)?;
                     self.handle_ut_metadata_msg(peer, &metadata_msg).await?;
                 }
+                MSG_LT_DONTHAVE => {
+                    let dont_have_msg = LTDontHaveMessage::from_bytes(&ext_msg.payload)?;
+                    {
+                        let mut state = peer.state.write().await;
+                        state.owned_pieces.set(dont_have_msg.piece, false);
+                    }
+                }
                 msg_name => {
                     debug!(?msg_name, "ignore unsupported ext msg");
                 }
@@ -909,6 +921,10 @@ impl TorrentSession {
                             );
 
                             peer.send_message_now(BTMessage::from(piece_data)).await?;
+                        } else if let Some(id) = peer.get_msg_id(MSG_LT_DONTHAVE) {
+                            let donthave = LTDontHaveMessage::new(info.index);
+                            peer.send_message_now(BTMessage::from((id, donthave)))
+                                .await?;
                         }
                     }
                 }

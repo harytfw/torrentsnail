@@ -198,4 +198,11 @@ impl Peer {
             _ = self.cancel.cancelled() => {}
         }
     }
+
+    pub fn get_msg_id(&self, msg_name: impl AsRef<str>) -> Option<u8> {
+        self.handshake
+            .ext_handshake
+            .as_ref()
+            .and_then(|ext| ext.get_msg_id(msg_name.as_ref()))
+    }
 }
