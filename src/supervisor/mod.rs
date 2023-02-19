@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use crate::{tracker::Session, Error, Result};
 use rand::random;
 use std::{fs, net::SocketAddr, path, sync::Arc};
 use tokio::{
@@ -207,5 +207,10 @@ impl TorrentSupervisor {
         }
         .instrument(debug_span!("shutdown"))
         .await
+    }
+
+    pub async fn sessions(self: &Arc<Self>) -> Vec<TorrentSession> {
+        let sessions = self.sessions.read().await.clone();
+        sessions
     }
 }

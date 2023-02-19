@@ -3,7 +3,13 @@ use crate::supervisor::{
     Error, Result,
 };
 use crate::torrent::HashId;
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    cmp,
+    collections::BTreeMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tokio::{io::AsyncWriteExt, sync::mpsc, sync::RwLock};
 use tokio::{
     net::{
@@ -15,14 +21,39 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
+fn timestamp_sec(t: SystemTime) -> u64 {
+    match t.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(dur) => dur.as_secs(),
+        _ => 0,
+    }
+}
+
+fn calc_speed(m: &BTreeMap<u64, usize>) -> usize {
+    let mut start = u64::MAX;
+    let mut end = u64::MIN;
+    let mut bytes = 0usize;
+    for (k, v) in m.iter().rev().take(10) {
+        start = cmp::min(start, *k);
+        end = cmp::max(end, *k);
+        bytes += v;
+    }
+    let elapse = (end.saturating_sub(start) + 1) as usize;
+    bytes / elapse
+}
+
 #[derive(Debug, Clone)]
 pub struct PeerState {
     pub broken: Option<String>,
     pub choke: bool,
     pub interested: bool,
-    // the pieces that current peer reported. if peer haven't reported it, the length is 0,
+    // the pieces that current peer reported. if peer didn't reported yet, the length is 0,
     // otherwise the length is the number of pieces
     pub owned_pieces: bit_vec::BitVec,
+
+    // store the number of bytes that we upload,
+    // key: timestamp in second, value: the number of bytes per second
+    pub upload_bytes: BTreeMap<u64, usize>,
+    pub download_bytes: BTreeMap<u64, usize>,
 }
 
 impl Default for PeerState {
@@ -32,7 +63,37 @@ impl Default for PeerState {
             broken: None,
             interested: false,
             owned_pieces: Default::default(),
+            upload_bytes: BTreeMap::new(),
+            download_bytes: BTreeMap::new(),
         }
+    }
+}
+
+impl PeerState {
+    fn update_download_bytes(&mut self, t: SystemTime, size: usize) {
+        let entry = self.download_bytes.entry(timestamp_sec(t)).or_insert(0);
+        *entry += size;
+        Self::retain_record(&mut self.download_bytes, 60);
+    }
+
+    fn update_upload_bytes(&mut self, t: SystemTime, size: usize) {
+        let entry = self.upload_bytes.entry(timestamp_sec(t)).or_insert(0);
+        *entry += size;
+        Self::retain_record(&mut self.upload_bytes, 60);
+    }
+
+    fn retain_record(m: &mut BTreeMap<u64, usize>, retain_size: usize) {
+        while m.len() > retain_size {
+            m.pop_first();
+        }
+    }
+
+    pub fn upload_speed(&self) -> usize {
+        calc_speed(&self.upload_bytes)
+    }
+
+    pub fn download_speed(&self) -> usize {
+        calc_speed(&self.download_bytes)
     }
 }
 
@@ -123,6 +184,24 @@ impl Peer {
         Ok(())
     }
 
+    fn on_send_piece(&self, size: usize) {
+        let state = Arc::clone(&self.state);
+        let t = SystemTime::now();
+        tokio::spawn(async move {
+            let mut state = state.write().await;
+            state.update_upload_bytes(t, size);
+        });
+    }
+
+    fn on_received_piece(&self, size: usize) {
+        let state = Arc::clone(&self.state);
+        let t = SystemTime::now();
+        tokio::spawn(async move {
+            let mut state = state.write().await;
+            state.update_download_bytes(t, size);
+        });
+    }
+
     async fn write_tcp(self, tx: OwnedWriteHalf, mut msg_tcp_rx: mpsc::Receiver<TcpMessage>) {
         let mut buf_tx = tokio::io::BufWriter::new(tx);
         let t = async {
@@ -133,6 +212,10 @@ impl Peer {
                         if let Some(tcp_msg) = tcp_msg_recv {
                             match tcp_msg {
                                 TcpMessage::Payload(msg) => {
+                                    // only record the size of piece message?
+                                    if let BTMessage::Piece(data) = &msg {
+                                        self.on_send_piece(data.fragment.len());
+                                    }
                                     buf_tx.write_all(&msg.to_bytes()).await?;
                                 }
                                 TcpMessage::Flush => {
@@ -173,6 +256,9 @@ impl Peer {
                 let result = BTMessage::from_reader_async(&mut buf_rx).await;
                 match result {
                     Ok(msg) => {
+                        if let BTMessage::Piece(data) = &msg {
+                            self.on_received_piece(data.fragment.len())
+                        }
                         self.msg_tx
                             .send(msg)
                             .await
@@ -204,5 +290,53 @@ impl Peer {
             .ext_handshake
             .as_ref()
             .and_then(|ext| ext.get_msg_id(msg_name.as_ref()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timestamp_sec() {
+        assert_eq!(timestamp_sec(SystemTime::UNIX_EPOCH), 0);
+        assert_eq!(
+            timestamp_sec(SystemTime::UNIX_EPOCH - Duration::from_secs(100)),
+            0
+        );
+        assert_eq!(
+            timestamp_sec(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+            100
+        );
+    }
+
+    #[test]
+    fn test_calc_speed() {
+        let mut bytes = vec![
+            (0, 100),
+            (1, 100),
+            (2, 100),
+            (3, 100),
+            (4, 100),
+            (5, 100),
+            (6, 100),
+            (7, 100),
+            (8, 100),
+            (9, 100),
+        ];
+        assert_eq!(calc_speed(&BTreeMap::from_iter(bytes.iter().cloned())), 100);
+        bytes.push((10, 1100));
+        assert_eq!(
+            calc_speed(&BTreeMap::from_iter(bytes.iter().cloned())),
+            (900 + 1100) / 10
+        );
+
+        assert_eq!(
+            calc_speed(&BTreeMap::from_iter(bytes.iter().cloned())),
+            (900 + 1100) / 10
+        );
+
+        assert_eq!(calc_speed(&BTreeMap::new()), 0);
+        assert_eq!(calc_speed(&BTreeMap::from_iter([(1, 100)])), 100);
     }
 }
