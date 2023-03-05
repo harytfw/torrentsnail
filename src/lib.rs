@@ -8,7 +8,7 @@ pub mod torrent;
 pub mod tracker;
 pub use error::{Error, Result};
 pub(crate) mod utils;
-
+pub mod limiter;
 pub const SNAIL_VERSION: &str = "TorrentSnail 0.0.1";
 
 #[cfg(test)]

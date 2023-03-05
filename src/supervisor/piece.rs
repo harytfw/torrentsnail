@@ -1,3 +1,4 @@
+use crate::limiter::RateLimiter;
 use crate::supervisor::types::PieceInfo;
 use crate::torrent::{HashId, TorrentInfo};
 use crate::{Error, Result};
@@ -672,19 +673,14 @@ fn shuffle_slice<T>(mut slice: &mut [T]) {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct SpeedRecord {
-    max_req_bytes: usize,
-    req_bytes: usize,
-}
+const ADAPTIVE_BYTES_STEP: f64 = (128 << 10) as f64;
 
 pub struct PieceLogManager {
     max_req: usize,
     logs: HashMap<usize, PieceLog>,
     all_checked: bool,
     fragment_len: usize,
-    adaptive_speed: HashMap<HashId, SpeedRecord>,
-    sync_adaptive_at: Instant,
+    adaptive_speed: HashMap<HashId, RateLimiter>,
     peer_owned_pieces: HashMap<HashId, BitVec>,
 }
 
@@ -695,15 +691,13 @@ impl PieceLogManager {
             logs: HashMap::new(),
             all_checked: false,
             fragment_len: 16 << 10,
-            adaptive_speed: HashMap::default(),
-            sync_adaptive_at: Instant::now(),
+            adaptive_speed: Default::default(),
             peer_owned_pieces: HashMap::default(),
         }
     }
 
     fn clear(&mut self) {
         self.logs.clear();
-        self.adaptive_speed.clear();
         self.peer_owned_pieces.clear();
     }
 
@@ -738,8 +732,6 @@ impl PieceLogManager {
                 .insert(index, PieceLog::new(index, pm.piece_len(index)));
         }
 
-        self.sync_adaptive_max_req();
-
         Ok(())
     }
 
@@ -750,27 +742,6 @@ impl PieceLogManager {
         Ok(())
     }
 
-    fn sync_adaptive_max_req(&mut self) {
-        const STEP: usize = 128 << 10;
-        if self.sync_adaptive_at.elapsed() < Duration::from_secs(1) {
-            return;
-        }
-        self.sync_adaptive_at = Instant::now();
-
-        for (k, v) in self.adaptive_speed.iter_mut() {
-            if v.max_req_bytes == 0 {
-                v.max_req_bytes = STEP;
-            }
-            if v.req_bytes == 0 {
-                v.max_req_bytes += STEP;
-            }
-            if v.req_bytes >= v.max_req_bytes {
-                v.max_req_bytes.checked_sub(STEP).unwrap_or(STEP);
-            }
-            debug!(?k, ?v);
-        }
-    }
-
     pub fn pull(&mut self, peer_id: &HashId) -> Vec<PieceInfo> {
         let mut ret = vec![];
 
@@ -778,14 +749,20 @@ impl PieceLogManager {
             return ret;
         }
 
-        let req_record = self
+        let limiter = self
             .adaptive_speed
             .entry(*peer_id)
-            .or_insert_with(Default::default);
+            .or_insert_with(|| RateLimiter::new(ADAPTIVE_BYTES_STEP, ADAPTIVE_BYTES_STEP));
 
         for log in self.logs.values_mut() {
-            if req_record.req_bytes > req_record.max_req_bytes {
-                debug!(?req_record, "exceed max req bytes capacity");
+            let len = cmp::min(log.bits.len() - log.offset, self.fragment_len);
+
+            let no_limit = limiter.take(len as f64);
+
+            if !no_limit {
+                if limiter.burst() > ADAPTIVE_BYTES_STEP {
+                    limiter.set_burst(limiter.burst() - ADAPTIVE_BYTES_STEP);
+                }
                 break;
             }
 
@@ -807,9 +784,7 @@ impl PieceLogManager {
 
             if pick {
                 log.peer = Some((*peer_id, Instant::now()));
-                let len = cmp::min(log.bits.len() - log.offset, self.fragment_len);
                 ret.push(PieceInfo::new(log.index, log.offset, len));
-                req_record.req_bytes += len
             }
         }
 
@@ -827,8 +802,11 @@ impl PieceLogManager {
             return None;
         }
 
-        if let Some(record) = self.adaptive_speed.get_mut(&peer_id) {
-            record.req_bytes = record.req_bytes.saturating_sub(buf.len());
+        if let Some(limiter) = self.adaptive_speed.get_mut(peer_id) {
+            limiter.put(buf.len() as f64);
+            if limiter.can_take(limiter.burst()) {
+                limiter.set_burst(limiter.burst() + ADAPTIVE_BYTES_STEP)
+            }
         }
 
         let complete = if let Some(log) = self.logs.get_mut(&index) {
@@ -841,6 +819,7 @@ impl PieceLogManager {
             }
 
             // find first index of data which is not received
+            // TODO: record first index of not-received byte, then we don't need to loop over bitmap
             if let Some((offset, _)) = log.bits.iter().enumerate().find(|(_, b)| !b) {
                 // request the rest data
                 log.offset = offset;
