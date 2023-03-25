@@ -32,6 +32,10 @@ impl RateLimiter {
         }
     }
 
+    pub fn take_all(&mut self) -> bool {
+        self.take(self.burst)
+    }
+
     pub fn take(&mut self, n: f64) -> bool {
         if n > self.burst {
             return false;

@@ -1,4 +1,7 @@
-use crate::{tracker::Session, Error, Result};
+use crate::message::BTHandshake;
+use crate::session::{TorrentSession, TorrentSessionBuilder};
+use crate::{dht::DHT, lsd::LSD, torrent::HashId};
+use crate::{Error, Result};
 use rand::random;
 use std::{fs, net::SocketAddr, path, sync::Arc};
 use tokio::{
@@ -8,21 +11,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, instrument, Instrument};
-pub mod peer;
-pub mod session;
-pub mod types;
-use self::{session::TorrentSessionBuilder, types::BTHandshake};
-use crate::{
-    dht::DHT,
-    lsd::LSD,
-    torrent::{HashId, TorrentFile},
-};
-use session::TorrentSession;
-pub mod piece;
 pub const MAX_FRAGMENT_LENGTH: usize = 16 << 10;
 
 #[derive(Clone)]
-pub struct TorrentSupervisor {
+pub struct Supervisor {
     pub my_id: Arc<HashId>,
     pub listen_addr: Arc<SocketAddr>,
     dht: DHT,
@@ -31,7 +23,7 @@ pub struct TorrentSupervisor {
     cancel: CancellationToken,
 }
 
-impl TorrentSupervisor {
+impl Supervisor {
     pub async fn start() -> Result<Arc<Self>> {
         let listen_addr: Arc<SocketAddr> = Arc::new("0.0.0.0:8081".parse()?);
 
@@ -43,7 +35,7 @@ impl TorrentSupervisor {
 
         let lsd = { LSD::new(Arc::clone(&udp), "192.168.2.56", 8081) };
 
-        let bt = Arc::new(Self {
+        let sup = Arc::new(Self {
             my_id,
             dht,
             lsd,
@@ -55,52 +47,13 @@ impl TorrentSupervisor {
             let tcp = TcpSocket::new_v4()?;
             tcp.bind(*listen_addr)?;
             let listener = tcp.listen(20)?;
-            tokio::spawn(Arc::clone(&bt).accept_tcp(listener));
+            tokio::spawn(Arc::clone(&sup).accept_tcp(listener));
         }
         {
-            tokio::spawn(Arc::clone(&bt).recv_udp(Arc::clone(&udp)));
+            tokio::spawn(Arc::clone(&sup).recv_udp(Arc::clone(&udp)));
         }
 
-        Ok(bt)
-    }
-
-    pub async fn download_with_torrent(
-        self: &Arc<Self>,
-        torrent: TorrentFile,
-    ) -> Result<TorrentSession> {
-        let info_hash = torrent.info_hash().unwrap();
-        let mut sessions = self.sessions.write().await;
-        for s in sessions.iter() {
-            if info_hash == s.info_hash {
-                return Ok(s.clone());
-            }
-        }
-        let ts = TorrentSessionBuilder::new()
-            .with_bt(Arc::downgrade(self))
-            .with_torrent(torrent)
-            .build()
-            .await?;
-        sessions.push(ts.clone());
-        Ok(ts)
-    }
-
-    pub async fn download_with_info_hash(
-        self: &Arc<Self>,
-        info_hash: &HashId,
-    ) -> Result<TorrentSession> {
-        let mut sessions = self.sessions.write().await;
-        for s in sessions.iter() {
-            if info_hash == &s.info_hash {
-                return Ok(s.clone());
-            }
-        }
-        let ts = TorrentSessionBuilder::new()
-            .with_bt(Arc::downgrade(self))
-            .with_info_hash(*info_hash)
-            .build()
-            .await?;
-        sessions.push(ts.clone());
-        Ok(ts)
+        Ok(sup)
     }
 
     async fn accept_tcp(self: Arc<Self>, listener: TcpListener) {
@@ -212,5 +165,14 @@ impl TorrentSupervisor {
     pub async fn sessions(self: &Arc<Self>) -> Vec<TorrentSession> {
         let sessions = self.sessions.read().await.clone();
         sessions
+    }
+
+    pub(crate) async fn attach_session(self: &Arc<Self>, session: TorrentSession) {
+        let mut s = self.sessions.write().await;
+        s.push(session);
+    }
+
+    pub fn builder(self: &Arc<Self>) -> TorrentSessionBuilder {
+        TorrentSessionBuilder::new().with_supervisor(Arc::downgrade(self))
     }
 }

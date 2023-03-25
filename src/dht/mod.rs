@@ -627,13 +627,14 @@ impl DHTInner {
             let sender = self.sender.clone();
             let handle = tokio::spawn(async move {
                 let addr = addr;
-                sender.send_ping(&addr).await
+                sender.send_ping(&addr).await;
+                ()
             });
             ping_handles.push(handle);
         }
 
         for handle in ping_handles {
-            handle.await.map_err(|e| Error::Generic(e.to_string()))??;
+            handle.await.map_err(|e| Error::Generic(e.to_string()))?;
         }
 
         Ok(())
@@ -883,7 +884,7 @@ impl DHT {
         dht
     }
 
-    async fn tick(self) -> Result<()> {
+    async fn tick(self) {
         let t = async {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(20)).await;
@@ -905,7 +906,6 @@ impl DHT {
             },
             _ = self.cancel.cancelled() => {}
         }
-        Ok(())
     }
 
     pub async fn on_packet(&self, packet: (Vec<u8>, SocketAddr)) -> Result<()> {

@@ -1,15 +1,8 @@
-use crate::supervisor::{
-    types::{BTHandshake, BTMessage},
-    Error, Result,
-};
+use crate::message::{BTHandshake, BTMessage};
+use crate::session::utils::{calc_speed, timestamp_sec};
 use crate::torrent::HashId;
-use std::{
-    cmp,
-    collections::BTreeMap,
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use crate::{Error, Result};
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::SystemTime};
 use tokio::{io::AsyncWriteExt, sync::mpsc, sync::RwLock};
 use tokio::{
     net::{
@@ -20,26 +13,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
-
-fn timestamp_sec(t: SystemTime) -> u64 {
-    match t.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(dur) => dur.as_secs(),
-        _ => 0,
-    }
-}
-
-fn calc_speed(m: &BTreeMap<u64, usize>) -> usize {
-    let mut start = u64::MAX;
-    let mut end = u64::MIN;
-    let mut bytes = 0usize;
-    for (k, v) in m.iter().rev().take(10) {
-        start = cmp::min(start, *k);
-        end = cmp::max(end, *k);
-        bytes += v;
-    }
-    let elapse = (end.saturating_sub(start) + 1) as usize;
-    bytes / elapse
-}
 
 #[derive(Debug, Clone)]
 pub struct PeerState {
@@ -97,25 +70,25 @@ impl PeerState {
     }
 }
 
-enum TcpMessage {
-    Payload(BTMessage),
+enum PeerMessage {
+    BT(BTMessage),
     Flush,
 }
 
-impl From<BTMessage> for TcpMessage {
+impl From<BTMessage> for PeerMessage {
     fn from(msg: BTMessage) -> Self {
-        Self::Payload(msg)
+        Self::BT(msg)
     }
 }
 
 #[derive(Clone)]
 pub struct Peer {
-    msg_tcp_tx: mpsc::Sender<TcpMessage>,
+    msg_tcp_tx: mpsc::Sender<PeerMessage>,
     msg_tx: mpsc::Sender<BTMessage>,
     cancel: CancellationToken,
     pub state: Arc<RwLock<PeerState>>,
-    pub addr: Arc<SocketAddr>,
-    pub peer_id: Arc<HashId>,
+    pub addr: SocketAddr,
+    pub peer_id: HashId,
     pub handshake: Arc<BTHandshake>,
     tasks: Arc<RwLock<JoinSet<()>>>,
 }
@@ -145,7 +118,7 @@ impl Peer {
             msg_tcp_tx,
             msg_tx,
             cancel: CancellationToken::new(),
-            addr: Arc::new(addr),
+            addr: addr,
             peer_id: handshake.peer_id.into(),
             handshake: Arc::new(handshake),
             tasks: Default::default(),
@@ -165,11 +138,11 @@ impl Peer {
         let mut tasks = self.tasks.write().await;
         while tasks.join_next().await.is_some() {}
         debug!(peer_id=?self.peer_id, addr = ?self.addr, "shutdown peer");
-        Ok(())
+        Result::Ok(())
     }
 
     pub async fn send_message(&self, msg: impl Into<BTMessage>) -> Result<()> {
-        self.msg_tcp_tx.send(TcpMessage::from(msg.into())).await?;
+        self.msg_tcp_tx.send(PeerMessage::from(msg.into())).await?;
         Ok(())
     }
 
@@ -180,8 +153,8 @@ impl Peer {
     }
 
     pub async fn flush(&self) -> Result<()> {
-        self.msg_tcp_tx.send(TcpMessage::Flush).await?;
-        Ok(())
+        self.msg_tcp_tx.send(PeerMessage::Flush).await?;
+        Result::Ok(())
     }
 
     fn on_send_piece(&self, size: usize) {
@@ -202,7 +175,7 @@ impl Peer {
         });
     }
 
-    async fn write_tcp(self, tx: OwnedWriteHalf, mut msg_tcp_rx: mpsc::Receiver<TcpMessage>) {
+    async fn write_tcp(self, tx: OwnedWriteHalf, mut msg_tcp_rx: mpsc::Receiver<PeerMessage>) {
         let mut buf_tx = tokio::io::BufWriter::new(tx);
         let t = async {
             loop {
@@ -211,14 +184,14 @@ impl Peer {
                     tcp_msg_recv = msg_tcp_rx.recv() => {
                         if let Some(tcp_msg) = tcp_msg_recv {
                             match tcp_msg {
-                                TcpMessage::Payload(msg) => {
+                                PeerMessage::BT(msg) => {
                                     // only record the size of piece message?
                                     if let BTMessage::Piece(data) = &msg {
                                         self.on_send_piece(data.fragment.len());
                                     }
                                     buf_tx.write_all(&msg.to_bytes()).await?;
                                 }
-                                TcpMessage::Flush => {
+                                PeerMessage::Flush => {
                                     buf_tx.flush().await?;
                                 }
                             }
@@ -294,49 +267,4 @@ impl Peer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_timestamp_sec() {
-        assert_eq!(timestamp_sec(SystemTime::UNIX_EPOCH), 0);
-        assert_eq!(
-            timestamp_sec(SystemTime::UNIX_EPOCH - Duration::from_secs(100)),
-            0
-        );
-        assert_eq!(
-            timestamp_sec(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
-            100
-        );
-    }
-
-    #[test]
-    fn test_calc_speed() {
-        let mut bytes = vec![
-            (0, 100),
-            (1, 100),
-            (2, 100),
-            (3, 100),
-            (4, 100),
-            (5, 100),
-            (6, 100),
-            (7, 100),
-            (8, 100),
-            (9, 100),
-        ];
-        assert_eq!(calc_speed(&BTreeMap::from_iter(bytes.iter().cloned())), 100);
-        bytes.push((10, 1100));
-        assert_eq!(
-            calc_speed(&BTreeMap::from_iter(bytes.iter().cloned())),
-            (900 + 1100) / 10
-        );
-
-        assert_eq!(
-            calc_speed(&BTreeMap::from_iter(bytes.iter().cloned())),
-            (900 + 1100) / 10
-        );
-
-        assert_eq!(calc_speed(&BTreeMap::new()), 0);
-        assert_eq!(calc_speed(&BTreeMap::from_iter([(1, 100)])), 100);
-    }
-}
+mod tests {}

@@ -55,7 +55,11 @@ pub enum Error {
     #[error("piece {0} not found")]
     PieceNotFound(usize),
     #[error("bad checksum size: {0}")]
-    BadChecksumSize(usize)
+    BadChecksumSize(usize),
+    #[error("magnet: {0}")]
+    Magnet(String),
+    #[error("socks5: {0}")]
+    Socks5(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

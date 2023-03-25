@@ -8,7 +8,12 @@ pub mod torrent;
 pub mod tracker;
 pub use error::{Error, Result};
 pub(crate) mod utils;
-pub mod limiter;
+pub mod ratelimiter;
+pub mod magnet;
+pub mod proxy;
+pub mod session;
+pub mod message;
+
 pub const SNAIL_VERSION: &str = "TorrentSnail 0.0.1";
 
 #[cfg(test)]

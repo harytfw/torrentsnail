@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::{collections::BTreeMap, fmt::Debug};
 
+pub const MSG_UT_METADATA: &str = "ut_metadata";
+pub const MSG_LT_DONTHAVE: &str = "lt_donthave";
+
 #[derive(Clone)]
 pub struct PieceData {
     pub index: usize,

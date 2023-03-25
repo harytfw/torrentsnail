@@ -1056,10 +1056,4 @@ mod test {
         assert!(!q.to_query_string().is_empty());
     }
 
-    #[test]
-    fn parse_packet() {
-        let data = fs::read("tests/packets/tracker/maybe-tracker.bin").unwrap();
-        let rsp = Response::from_bytes(&data).unwrap();
-        println!("{rsp:?}");
-    }
 }
