@@ -14,7 +14,7 @@ use tracing::{debug, debug_span, error, instrument, Instrument};
 pub const MAX_FRAGMENT_LENGTH: usize = 16 << 10;
 
 #[derive(Clone)]
-pub struct Supervisor {
+pub struct Application {
     pub my_id: Arc<HashId>,
     pub listen_addr: Arc<SocketAddr>,
     dht: DHT,
@@ -23,7 +23,7 @@ pub struct Supervisor {
     cancel: CancellationToken,
 }
 
-impl Supervisor {
+impl Application {
     pub async fn start() -> Result<Arc<Self>> {
         let listen_addr: Arc<SocketAddr> = Arc::new("0.0.0.0:8081".parse()?);
 

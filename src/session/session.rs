@@ -1,22 +1,20 @@
+use crate::app::Application;
 use crate::dht::DHT;
 use crate::lsd::LSD;
 use crate::magnet::MagnetURI;
 use crate::message::{
-    BTExtMessage, BTHandshake, BTMessage, LTDontHaveMessage, PieceData, PieceInfo,
-    UTMetadataMessage, UTMetadataPieceData, MSG_LT_DONTHAVE, MSG_UT_METADATA,
+    BTHandshake, BTMessage, LTDontHaveMessage, PieceData, PieceInfo, UTMetadataMessage,
+    MSG_LT_DONTHAVE, MSG_UT_METADATA,
 };
 use crate::session::manager::PieceActivityManager;
 use crate::session::peer::Peer;
 use crate::session::storage::StorageManager;
 use crate::session::utils::make_announce_key;
-use crate::supervisor::Supervisor;
 use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
 use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -38,7 +36,7 @@ pub struct TorrentSessionBuilder {
     torrent_path: Option<PathBuf>,
     torrent: Option<TorrentFile>,
     storage_dir: Option<PathBuf>,
-    bt: Option<Weak<Supervisor>>,
+    bt: Option<Weak<Application>>,
     check_files: bool,
     dht: Option<DHT>,
     lsd: Option<LSD>,
@@ -51,7 +49,7 @@ impl TorrentSessionBuilder {
         Self::default()
     }
 
-    pub fn with_supervisor(self, bt: Weak<Supervisor>) -> Self {
+    pub fn with_supervisor(self, bt: Weak<Application>) -> Self {
         Self {
             bt: Some(bt),
             ..self

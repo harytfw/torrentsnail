@@ -1,18 +1,18 @@
 pub mod addr;
+pub mod app;
 pub mod bencode;
 pub mod dht;
 mod error;
 pub mod lsd;
-pub mod supervisor;
 pub mod torrent;
 pub mod tracker;
 pub use error::{Error, Result};
-pub(crate) mod utils;
-pub mod ratelimiter;
 pub mod magnet;
-pub mod proxy;
-pub mod session;
 pub mod message;
+pub mod proxy;
+pub mod ratelimiter;
+pub mod session;
+pub(crate) mod utils;
 
 pub const SNAIL_VERSION: &str = "TorrentSnail 0.0.1";
 
