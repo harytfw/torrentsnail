@@ -57,15 +57,15 @@ impl HashId {
 
     pub fn from_hex(s: impl AsRef<str>) -> Result<Self> {
         let data = hex::decode(s.as_ref()).map_err(|err| Error::InvalidInput(err.to_string()))?;
-        Self::try_from(data.as_slice()).map_err(|err| Error::InvalidInput(err.to_string()))
+        Self::from_slice(data.as_slice())
     }
 
     pub fn from_slice(slice: &[u8]) -> Result<Self> {
         if slice.len() == Self::ZERO_V1.len() {
-            let id: [u8; 20] = slice.try_into().map_err(|_| Error::BytesToHashId)?;
+            let id: [u8; 20] = slice.try_into().unwrap();
             Ok(Self::V1(id))
         } else if slice.len() == Self::ZERO_V2.len() {
-            let id: [u8; 32] = slice.try_into().map_err(|_| Error::BytesToHashId)?;
+            let id: [u8; 32] = slice.try_into().unwrap();
             Ok(Self::V2(id))
         } else {
             Err(Error::BytesToHashId)
