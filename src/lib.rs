@@ -12,7 +12,9 @@ pub mod message;
 pub mod proxy;
 pub mod ratelimiter;
 pub mod session;
-pub(crate) mod utils;
+
+pub mod utils;
+pub mod db;
 
 pub const SNAIL_VERSION: &str = "TorrentSnail 0.0.1";
 
