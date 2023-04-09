@@ -1,7 +1,7 @@
 use crate::app::models::AddTorrentReq;
 use crate::app::Application;
 use crate::Result;
-use axum::headers::{self};
+use axum::headers::{self, Header};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use axum::{
@@ -42,9 +42,15 @@ pub async fn start_server(app: Arc<Application>) {
     };
 }
 
+pub static TRACE_ID_HEADER: headers::HeaderName = headers::HeaderName::from_static("x-trace-id");
+
 pub struct TraceId(u64);
 
-pub static TRACE_ID_HEADER: headers::HeaderName = headers::HeaderName::from_static("x-trace-id");
+impl TraceId {
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
 
 impl headers::Header for TraceId {
     fn name() -> &'static headers::HeaderName {
@@ -61,7 +67,7 @@ impl headers::Header for TraceId {
             .or_else(|_| Err(headers::Error::invalid()))?
             .parse::<u64>()
             .or_else(|_| Err(headers::Error::invalid()))?;
-        Ok(TraceId(id))
+        Ok(TraceId::new(id))
     }
 
     fn encode<E>(&self, values: &mut E)
@@ -106,12 +112,12 @@ where
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        let trace_id = request.headers().get("X-Trace-Id").cloned();
+        let trace_id = request.headers().get(TraceId::name()).cloned();
         let future = self.inner.call(request);
         Box::pin(async move {
             let mut response: Response = future.await?;
             if let Some(trace_id) = trace_id {
-                response.headers_mut().insert("X-Trace-Id", trace_id);
+                response.headers_mut().insert(TraceId::name(), trace_id);
             }
             Ok(response)
         })
@@ -174,4 +180,9 @@ pub async fn add_torrent(app: Arc<Application>, req: &AddTorrentReq) -> Result<A
     // let resp = app.add_torrent(req).await?;
     // Ok(resp)
     Ok(AddTorrentResp {})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 }
