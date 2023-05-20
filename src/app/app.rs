@@ -178,10 +178,15 @@ impl Application {
     }
 
     pub fn builder(self: &Arc<Self>) -> TorrentSessionBuilder {
-        TorrentSessionBuilder::new().with_supervisor(Arc::downgrade(self))
+        TorrentSessionBuilder::new()
+            .with_app(Arc::downgrade(self))
+            .with_lsd(self.lsd.clone())
+            .with_dht(self.dht.clone())
+            .with_my_id(*self.my_id)
+            .with_listen_addr(*self.listen_addr)
     }
 
-	pub async fn wait_until_shutdown(self: &Arc<Self>) {
-		self.cancel.cancelled().await;
-	}
+    pub async fn wait_until_shutdown(self: &Arc<Self>) {
+        self.cancel.cancelled().await;
+    }
 }

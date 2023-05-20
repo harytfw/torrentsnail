@@ -36,7 +36,7 @@ pub struct TorrentSessionBuilder {
     torrent_path: Option<PathBuf>,
     torrent: Option<TorrentFile>,
     storage_dir: Option<PathBuf>,
-    bt: Option<Weak<Application>>,
+    app: Option<Weak<Application>>,
     check_files: bool,
     dht: Option<DHT>,
     lsd: Option<LSD>,
@@ -49,9 +49,9 @@ impl TorrentSessionBuilder {
         Self::default()
     }
 
-    pub fn with_supervisor(self, bt: Weak<Application>) -> Self {
+    pub fn with_app(self, bt: Weak<Application>) -> Self {
         Self {
-            bt: Some(bt),
+            app: Some(bt),
             ..self
         }
     }
@@ -155,8 +155,8 @@ impl TorrentSessionBuilder {
     }
 
     pub async fn build(mut self) -> Result<TorrentSession> {
-        let bt_weak = self.bt.unwrap();
-        let bt = bt_weak.upgrade().unwrap();
+        let app_weak = self.app.unwrap();
+        let app = app_weak.upgrade().unwrap();
 
         let mut pm: StorageManager;
         let mut metadata_cache: StorageManager;
@@ -206,7 +206,7 @@ impl TorrentSessionBuilder {
             metadata_cache = StorageManager::empty();
         }
 
-        let handshake_template = Self::build_handshake(&bt.my_id, &info_hash);
+        let handshake_template = Self::build_handshake(&app.my_id, &info_hash);
 
         let (peer_conn_req_tx, peer_addr_rx) = mpsc::channel(10);
         let (peer_piece_req_tx, peer_piece_req_rx) = mpsc::channel(50);
@@ -245,7 +245,7 @@ impl TorrentSessionBuilder {
                 ts_clone.start_tick(peer_addr_rx, peer_piece_req_rx).await;
             });
         }
-        bt.attach_session(ts.clone()).await;
+        app.attach_session(ts.clone()).await;
         Ok(ts)
     }
 }
