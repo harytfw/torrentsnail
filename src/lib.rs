@@ -15,6 +15,7 @@ pub mod session;
 
 pub mod utils;
 pub mod db;
+pub mod config;
 
 pub const SNAIL_VERSION: &str = "TorrentSnail 0.0.1";
 

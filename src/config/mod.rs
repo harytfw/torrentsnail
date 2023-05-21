@@ -1,25 +1,38 @@
-use std::sync::{Arc, RwLock};
+use std::{sync::{Arc}, net::SocketAddr};
+use tokio::sync::RwLock;
+use crate::Result;
 
+#[derive(Debug, Clone, Default)]
 pub struct Config {
-	proxy: Option<ProxyConfig>,
+	pub proxy: Option<ProxyConfig>,
 }
 
+#[derive(Debug, Clone)]
 pub enum ProxyType {
 	Socks5,
 	Http,
 }
 
+#[derive(Debug, Clone)]
 pub struct ProxyConfig {
-	typ: ProxyType,
-	addr: String,
-	port: u16,
-	dns_query: bool,	
-	auth: Option<ProxyAuthConfig>,
+	pub r#type: ProxyType,
+	pub addr: String,
+	pub port: u16,
+	pub dns_query: bool,	
+	pub auth: Option<ProxyAuthConfig>,
 }
 
+impl ProxyConfig {
+	pub fn to_socks5_addr(&self) -> Result<SocketAddr> {
+		let sa = format!("{}:{}", self.addr, self.port).parse()?;
+		Ok(sa)
+	}
+}
+
+#[derive(Debug, Clone)]
 pub struct ProxyAuthConfig {
-	username: (),
-	password: (),
+	pub username: String,
+	pub password: String,
 }
 
 pub type MutableConfig = Arc<RwLock<Config>>;

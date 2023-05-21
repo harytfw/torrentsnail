@@ -17,6 +17,7 @@ pub struct Session {
     sock: Arc<UdpSocket>,
     addr: Arc<SocketAddr>,
     pub url: Arc<String>,
+    // TODO: replace by DashMap
     transactions: Arc<Mutex<HashMap<u32, oneshot::Sender<Response>>>>,
     state: Arc<RwLock<SessionState>>,
     packet_tx: mpsc::Sender<Vec<u8>>,

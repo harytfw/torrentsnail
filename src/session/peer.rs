@@ -81,6 +81,14 @@ impl From<BTMessage> for PeerMessage {
     }
 }
 
+pub struct PeerConfig {}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
 #[derive(Clone)]
 pub struct Peer {
     msg_tcp_tx: mpsc::Sender<PeerMessage>,
@@ -91,6 +99,28 @@ pub struct Peer {
     pub peer_id: HashId,
     pub handshake: Arc<BTHandshake>,
     tasks: Arc<RwLock<JoinSet<()>>>,
+    cfg: Arc<PeerConfig>,
+}
+
+impl std::cmp::PartialEq for Peer {
+    fn eq(&self, other: &Self) -> bool {
+        self.peer_id == other.peer_id
+    }
+}
+
+impl std::cmp::Eq for Peer {}
+
+impl std::hash::Hash for Peer {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.peer_id.hash(state);
+    }
+}
+
+impl Drop for Peer {
+    fn drop(&mut self) {
+        // TODO: safety shutdown peer connection
+        self.cancel.cancel();
+    }
 }
 
 impl std::fmt::Debug for Peer {
@@ -106,6 +136,7 @@ impl Peer {
     pub async fn attach(
         handshake: BTHandshake,
         tcp: TcpStream,
+        cfg: PeerConfig,
     ) -> Result<(Self, mpsc::Receiver<BTMessage>)> {
         let addr = tcp.peer_addr()?;
         let (tcp_rx, tcp_tx) = tcp.into_split();
@@ -122,6 +153,7 @@ impl Peer {
             peer_id: handshake.peer_id.into(),
             handshake: Arc::new(handshake),
             tasks: Default::default(),
+            cfg: Arc::new(cfg),
         };
 
         {

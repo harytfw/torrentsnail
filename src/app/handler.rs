@@ -1,31 +1,82 @@
-use crate::app::models::AddTorrentReq;
+use crate::app::middleware;
 use crate::app::Application;
-use crate::Result;
-use axum::headers::{self, Header};
+use crate::torrent::HashId;
+use crate::Error;
+use axum::http::{HeaderName, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::routing::post;
 use axum::Json;
-use axum::{
-    body::{Body, Bytes},
-    extract::{Path, State, TypedHeader},
-    http::{Request, StatusCode},
-    routing::post,
-    Router,
-};
-use futures::future::BoxFuture;
+use axum::{extract::Path, extract::State, Router};
+use futures::future::join_all;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use tower_http::request_id::{
+    MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
+};
 use tracing::error;
 use tracing::log::info;
 
-use super::models::{AddTorrentResp, Ping, Pong};
+use crate::app::models::CreateTorrentSessionRequest;
+use crate::app::models::{ErrorResponse, Pagination, Pong, TorrentSessionInfo};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+
+use super::models::AddSessionPeerRequest;
+use super::models::PeerInfo;
+use super::models::UpdateTorrentSessionRequest;
+
+// A `MakeRequestId` that increments an atomic counter
+#[derive(Clone, Default)]
+struct MyMakeRequestId {
+    counter: Arc<AtomicU64>,
+}
+
+impl MakeRequestId for MyMakeRequestId {
+    fn make_request_id<B>(&mut self, request: &Request<B>) -> Option<RequestId> {
+        let request_id = self
+            .counter
+            .fetch_add(1, Ordering::SeqCst)
+            .to_string()
+            .parse()
+            .unwrap();
+
+        Some(RequestId::new(request_id))
+    }
+}
 
 pub async fn start_server(app: Arc<Application>) {
     let cancel_clone = app.cancel.clone();
-    // build our application with a single route
 
     let router = Router::new()
-        .route("/api/v1/:method", post(handler))
-        .layer(TraceIdLayer)
+        .route("/", get(|| async {}))
+        .route("/ping", get(handler_ping))
+        .nest(
+            "/api/v1",
+            Router::new()
+                .route("/echo", post(handler_echo))
+                .route(
+                    "/torrent/sessions",
+                    get(list_torrent_sessions)
+                        .post(create_torrent_session)
+                        .patch(update_torrent_session),
+                )
+                .route(
+                    "/torrents/sessions/:info_hash/peers",
+                    get(list_session_peers).post(add_session_peer),
+                )
+                .layer(SetRequestIdLayer::x_request_id(MyMakeRequestId::default()))
+                .layer(PropagateRequestIdLayer::x_request_id())
+                .layer(middleware::auth::AuthLayer::with_username_password(
+                    "torrentsnail",
+                    "lianstnerrot",
+                )),
+        )
+        .layer(
+            TraceLayer::new_for_http()
+                // FIXME: exclude authorization header from log
+                .make_span_with(DefaultMakeSpan::new().include_headers(true))
+                .on_response(DefaultOnResponse::new().include_headers(true)),
+        )
         .with_state(Arc::clone(&app));
 
     info!("listen http server with addr: 0.0.0.0:3000");
@@ -42,146 +93,110 @@ pub async fn start_server(app: Arc<Application>) {
     };
 }
 
-pub static TRACE_ID_HEADER: headers::HeaderName = headers::HeaderName::from_static("x-trace-id");
-
-pub struct TraceId(u64);
-
-impl TraceId {
-    pub fn new(id: u64) -> Self {
-        Self(id)
-    }
+async fn handler_echo(d: Json<String>) -> Json<String> {
+    return d;
 }
 
-impl headers::Header for TraceId {
-    fn name() -> &'static headers::HeaderName {
-        &TRACE_ID_HEADER
-    }
-
-    fn decode<'i, I>(values: &mut I) -> Result<Self, headers::Error>
-    where
-        I: Iterator<Item = &'i headers::HeaderValue>,
-    {
-        let value = values.next().ok_or_else(headers::Error::invalid)?;
-        let id = value
-            .to_str()
-            .or_else(|_| Err(headers::Error::invalid()))?
-            .parse::<u64>()
-            .or_else(|_| Err(headers::Error::invalid()))?;
-        Ok(TraceId::new(id))
-    }
-
-    fn encode<E>(&self, values: &mut E)
-    where
-        E: Extend<headers::HeaderValue>,
-    {
-        let value = headers::HeaderValue::from_str(self.0.to_string().as_str())
-            .expect("invalid header value");
-
-        values.extend(std::iter::once(value));
-    }
+async fn handler_ping(State(app): State<Arc<Application>>) -> Json<Pong> {
+    Json(Pong::new())
 }
 
-#[derive(Clone, Debug)]
-pub struct TraceIdLayer;
-
-impl<S> tower::Layer<S> for TraceIdLayer {
-    type Service = TraceIdMiddleware<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        TraceIdMiddleware { inner }
-    }
+async fn list_torrent_sessions(State(app): State<Arc<Application>>) -> Response {
+    let session = app.sessions();
+    let session_info_list: Vec<TorrentSessionInfo> = session
+        .iter()
+        .map(|s| TorrentSessionInfo::from_session(&s))
+        .collect();
+    Json(Pagination::new(session_info_list, None)).into_response()
 }
 
-#[derive(Clone)]
-pub struct TraceIdMiddleware<S> {
-    inner: S,
-}
-
-impl<S> tower::Service<Request<Body>> for TraceIdMiddleware<S>
-where
-    S: tower::Service<Request<Body>, Response = Response> + Send + 'static,
-    S::Future: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    // `BoxFuture` is a type alias for `Pin<Box<dyn Future + Send + 'a>>`
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, request: Request<Body>) -> Self::Future {
-        let trace_id = request.headers().get(TraceId::name()).cloned();
-        let future = self.inner.call(request);
-        Box::pin(async move {
-            let mut response: Response = future.await?;
-            if let Some(trace_id) = trace_id {
-                response.headers_mut().insert(TraceId::name(), trace_id);
-            }
-            Ok(response)
-        })
-    }
-}
-
-macro_rules! dispatch_method {
-    ($app: ident, $body: ident,  $method: ident, $req_type: ty) => {
-        match serde_json::from_slice::<$req_type>($body.as_ref()) {
-            Ok(req) => {
-                let result = $method($app, &req).await;
-                let response = match result {
-                    Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
-                    Err(e) => (
-                        StatusCode::OK,
-                        [(
-                            headers::HeaderName::from_static("x-error"),
-                            headers::HeaderValue::from_static("1"),
-                        )],
-                        Json(e.to_string()),
-                    )
-                        .into_response(),
-                };
-                response
-            }
-            Err(e) => (
-                StatusCode::OK,
-                [(
-                    headers::HeaderName::from_static("x-error"),
-                    headers::HeaderValue::from_static("1"),
-                )],
-                Json(e.to_string()),
-            )
-                .into_response(),
+async fn create_torrent_session(
+    State(app): State<Arc<Application>>,
+    req: Json<CreateTorrentSessionRequest>,
+) -> Response {
+    let builder = match app.builder().with_uri(&req.uri) {
+        Ok(builder) => builder,
+        Err(e) => {
+            return Json(ErrorResponse::from(e)).into_response();
+        }
+    };
+    match builder.build().await {
+        Ok(session) => {
+            return Json(TorrentSessionInfo::from_session(&session)).into_response();
+        }
+        Err(e) => {
+            return Json(ErrorResponse::from(e)).into_response();
         }
     };
 }
 
-pub async fn handler(
+async fn update_torrent_session(
     State(app): State<Arc<Application>>,
-    method: Path<String>,
-    body: Bytes,
+    req: Json<UpdateTorrentSessionRequest>,
 ) -> Response {
-    match method.as_str() {
-        "ping" => {
-            return dispatch_method!(app, body, ping, Ping);
+    unimplemented!()
+}
+
+async fn list_session_peers(
+    State(app): State<Arc<Application>>,
+    Path(info_hash): Path<String>,
+) -> Response {
+    let id = HashId::from_hex(&info_hash).unwrap();
+    app.get_session(&id)
+        .map(|session| {
+            Json(Pagination::new(
+                session
+                    .peers()
+                    .iter()
+                    .map(|p| PeerInfo::from_peer(&p))
+                    .collect::<Vec<_>>(),
+                None,
+            ))
+            .into_response()
+        })
+        .unwrap_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::from(Error::Generic(
+                    "session not found".to_string(),
+                ))),
+            )
+                .into_response()
+        })
+}
+async fn add_session_peer(
+    State(app): State<Arc<Application>>,
+    Path(info_hash): Path<String>,
+    req: Json<AddSessionPeerRequest>,
+) -> Response {
+    let id = HashId::from_hex(&info_hash).unwrap();
+    let session = match app.get_session(&id) {
+        Some(session) => session,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::from(Error::Generic(
+                    "session not found".to_string(),
+                ))),
+            )
+                .into_response();
         }
-        "add_torrent" => {
-            return dispatch_method!(app, body, add_torrent, AddTorrentReq);
+    };
+    for addr in req.parse_peers().unwrap_or_default() {
+        {
+            let session = session.clone();
+            tokio::spawn(async move {
+                match session.add_peer_with_addr(addr).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!(err = ?e, "add peer");
+                    }
+                };
+            });
         }
-        _ => (StatusCode::OK, Json(())).into_response(),
     }
+    StatusCode::ACCEPTED.into_response()
 }
-
-pub async fn ping(app: Arc<Application>, req: &Ping) -> Result<Pong> {
-    Ok(Pong::from(req))
-}
-
-pub async fn add_torrent(app: Arc<Application>, req: &AddTorrentReq) -> Result<AddTorrentResp> {
-    // let resp = app.add_torrent(req).await?;
-    // Ok(resp)
-    Ok(AddTorrentResp {})
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

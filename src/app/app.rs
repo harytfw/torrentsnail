@@ -1,8 +1,10 @@
+use crate::config::{Config, MutableConfig};
 use crate::message::BTHandshake;
 use crate::session::{TorrentSession, TorrentSessionBuilder};
 use crate::{dht::DHT, lsd::LSD, torrent::HashId};
 use crate::{Error, Result};
 
+use dashmap::DashMap;
 use rand::random;
 use std::{fs, net::SocketAddr, path, sync::Arc};
 use tokio::{
@@ -22,8 +24,9 @@ pub struct Application {
     pub listen_addr: Arc<SocketAddr>,
     dht: DHT,
     lsd: LSD,
-    sessions: Arc<RwLock<Vec<TorrentSession>>>,
+    sessions: Arc<DashMap<HashId, TorrentSession>>,
     pub cancel: CancellationToken,
+    config: MutableConfig,
 }
 
 impl Application {
@@ -42,9 +45,10 @@ impl Application {
             my_id,
             dht,
             lsd,
-            sessions: Arc::new(RwLock::new(vec![])),
+            sessions: Arc::new(DashMap::new()),
             cancel: CancellationToken::new(),
             listen_addr: Arc::clone(&listen_addr),
+            config: MutableConfig::new(RwLock::new(Config::default())),
         });
         {
             let tcp = TcpSocket::new_v4()?;
@@ -120,13 +124,8 @@ impl Application {
             }
         };
 
-        let session = self
-            .sessions
-            .read()
-            .await
-            .iter()
-            .find(|t| t.info_hash.as_ref() == &handshake.info_hash)
-            .cloned();
+        let session: Option<TorrentSession> =
+            self.sessions.get(&handshake.info_hash).map(|s| s.clone());
 
         if let Some(session) = session {
             if let Err(e) = session.passive_handshake(handshake, tcp).await {
@@ -158,23 +157,26 @@ impl Application {
         self.cancel.cancel();
         async {
             self.dht.shutdown().await?;
-            for session in self.sessions.write().await.drain(..) {
+            for session in self.sessions.iter() {
                 session.shutdown().await?;
             }
+            self.sessions.clear();
             Ok(())
         }
         .instrument(debug_span!("shutdown"))
         .await
     }
 
-    pub async fn sessions(self: &Arc<Self>) -> Vec<TorrentSession> {
-        let sessions = self.sessions.read().await.clone();
-        sessions
+    pub fn sessions(self: &Arc<Self>) -> Arc<DashMap<HashId, TorrentSession>> {
+        self.sessions.clone()
+    }
+
+    pub fn get_session(self: &Arc<Self>, info_hash: &HashId) -> Option<TorrentSession> {
+        self.sessions.get(info_hash).map(|s| s.clone())
     }
 
     pub(crate) async fn attach_session(self: &Arc<Self>, session: TorrentSession) {
-        let mut s = self.sessions.write().await;
-        s.push(session);
+        self.sessions.insert(*session.info_hash, session);
     }
 
     pub fn builder(self: &Arc<Self>) -> TorrentSessionBuilder {
@@ -184,6 +186,7 @@ impl Application {
             .with_dht(self.dht.clone())
             .with_my_id(*self.my_id)
             .with_listen_addr(*self.listen_addr)
+            .with_config(self.config.clone())
     }
 
     pub async fn wait_until_shutdown(self: &Arc<Self>) {

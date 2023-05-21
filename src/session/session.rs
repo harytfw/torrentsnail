@@ -1,4 +1,5 @@
 use crate::app::Application;
+use crate::config::{Config, MutableConfig, ProxyType};
 use crate::dht::DHT;
 use crate::lsd::LSD;
 use crate::magnet::MagnetURI;
@@ -6,15 +7,22 @@ use crate::message::{
     BTHandshake, BTMessage, LTDontHaveMessage, PieceData, PieceInfo, UTMetadataMessage,
     MSG_LT_DONTHAVE, MSG_UT_METADATA,
 };
+use crate::proxy::socks5::Socks5Client;
 use crate::session::manager::PieceActivityManager;
 use crate::session::peer::Peer;
 use crate::session::storage::StorageManager;
 use crate::session::utils::make_announce_key;
 use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
-use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
+use crate::{bencode, proxy, torrent, tracker, Error, Result, SNAIL_VERSION};
+use core::fmt;
+use std::str::FromStr;
+use num::{FromPrimitive, ToPrimitive};
+use serde::{Serialize, Serializer, Deserialize};
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -26,7 +34,8 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use torrent::{HashId, TorrentInfo};
-use tracing::{debug, error, instrument, warn};
+use tracing::field::debug;
+use tracing::{debug, error, info, instrument, warn};
 
 const METADATA_PIECE_SIZE: usize = 16384;
 
@@ -42,6 +51,7 @@ pub struct TorrentSessionBuilder {
     lsd: Option<LSD>,
     my_id: Option<HashId>,
     listen_addr: Option<SocketAddr>,
+    config: Option<MutableConfig>,
 }
 
 impl TorrentSessionBuilder {
@@ -143,6 +153,13 @@ impl TorrentSessionBuilder {
         }
     }
 
+    pub fn with_config(self, config: MutableConfig) -> Self {
+        Self {
+            config: Some(config),
+            ..self
+        }
+    }
+
     fn build_handshake(my_id: &HashId, info_hash: &HashId) -> BTHandshake {
         let mut handshake = BTHandshake::new(my_id, info_hash);
 
@@ -210,6 +227,7 @@ impl TorrentSessionBuilder {
 
         let (peer_conn_req_tx, peer_addr_rx) = mpsc::channel(10);
         let (peer_piece_req_tx, peer_piece_req_rx) = mpsc::channel(50);
+        let (peer_to_poll_tx, peer_to_poll_rx) = mpsc::channel(100);
 
         if info_hash.is_zero() {
             return Err(Error::Generic("no info hash".into()));
@@ -218,8 +236,12 @@ impl TorrentSessionBuilder {
         let tracker = TrackerClient::new();
 
         let ts = TorrentSession {
+            name: torrent
+                .as_ref()
+                .map(|t| t.info.name.to_string())
+                .unwrap_or_else(|| info_hash.hex()),
             tracker: tracker,
-            peers: Arc::new(RwLock::new(vec![])),
+            peers: Arc::new(dashmap::DashMap::new()),
             info_hash: Arc::new(info_hash),
             metadata_sm: Arc::new(RwLock::new(metadata_cache)),
             handshake_template: Arc::new(handshake_template),
@@ -238,13 +260,18 @@ impl TorrentSessionBuilder {
             dht: self.dht.unwrap(),
             my_id: self.my_id.unwrap(),
             listen_addr: self.listen_addr.unwrap(),
+            cfg: self.config.unwrap(),
+            peer_to_poll_tx: peer_to_poll_tx,
         };
         {
             let ts_clone = ts.clone();
             tokio::spawn(async move {
-                ts_clone.start_tick(peer_addr_rx, peer_piece_req_rx).await;
+                ts_clone
+                    .start_tick(peer_addr_rx, peer_piece_req_rx, peer_to_poll_rx)
+                    .await;
             });
         }
+        info!(?info_hash, "new torrent session");
         app.attach_session(ts.clone()).await;
         Ok(ts)
     }
@@ -252,21 +279,17 @@ impl TorrentSessionBuilder {
 
 #[derive(Debug, Clone, Copy)]
 pub enum TorrentSessionStatus {
-    Stopped,
+    Stopped = 0,
     Started,
     Seeding,
 }
 
-impl TorrentSessionStatus {
-    pub fn to_u32(self) -> u32 {
-        match self {
-            Self::Started => 0,
-            Self::Stopped => 1,
-            Self::Seeding => 2,
-        }
+impl FromPrimitive for TorrentSessionStatus {
+    fn from_i64(num: i64) -> Option<Self> {
+        Self::from_u64(num as u64)
     }
 
-    pub fn from_u32(num: u32) -> Option<Self> {
+    fn from_u64(num: u64) -> Option<Self> {
         let s = match num {
             0 => Self::Started,
             1 => Self::Stopped,
@@ -277,13 +300,62 @@ impl TorrentSessionStatus {
     }
 }
 
+impl ToPrimitive for TorrentSessionStatus {
+    fn to_i64(&self) -> Option<i64> {
+        Some(*self as i64)
+    }
+
+    fn to_u64(&self) -> Option<u64> {
+        Some(*self as u64)
+    }
+}
+
+impl fmt::Display for TorrentSessionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Started => "started",
+            Self::Stopped => "stopped",
+            Self::Seeding => "seeding",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl FromStr for TorrentSessionStatus {
+    type Err = Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "started" => Ok(Self::Started),
+            "stopped" => Ok(Self::Stopped),
+            "seeding" => Ok(Self::Seeding),
+            _ => Err(Error::Generic(format!("invalid status: {}", s))),
+        }
+    }
+}
+
+impl Serialize for TorrentSessionStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for TorrentSessionStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de> {
+        let s = String::deserialize(deserializer)?;
+        Self::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+// TODO: reduce struct size
 #[derive(Clone)]
 pub struct TorrentSession {
     pub info_hash: Arc<HashId>,
     pub torrent: Arc<RwLock<Option<TorrentFile>>>,
     pub(crate) storage_dir: Arc<PathBuf>,
 
-    peers: Arc<RwLock<Vec<Peer>>>,
+    peers: Arc<dashmap::DashMap<HashId, Peer>>,
     pub(crate) handshake_template: Arc<BTHandshake>,
     long_term_tasks: Arc<RwLock<JoinSet<()>>>,
     short_term_tasks: Arc<RwLock<JoinSet<()>>>,
@@ -301,6 +373,9 @@ pub struct TorrentSession {
     tracker: TrackerClient,
     dht: DHT,
     lsd: LSD,
+    cfg: MutableConfig,
+    peer_to_poll_tx: mpsc::Sender<HashId>,
+    pub name: String,
 }
 
 impl Debug for TorrentSession {
@@ -329,7 +404,13 @@ impl TorrentSession {
     }
 
     #[instrument(skip_all, fields(info_hash=?self.info_hash))]
-    pub async fn active_handshake(&self, mut tcp: TcpStream) -> Result<Peer> {
+    pub async fn active_handshake_with_addr(&self, addr: impl ToSocketAddrs) -> Result<Peer> {
+        let tcp = TcpStream::connect(addr).await?;
+        return self.active_handshake_with_tcp(tcp).await;
+    }
+
+    #[instrument(skip_all, fields(info_hash=?self.info_hash))]
+    pub async fn active_handshake_with_tcp(&self, mut tcp: TcpStream) -> Result<Peer> {
         tcp.write_all(&self.handshake_template.to_bytes()).await?;
 
         let peer_handshake = BTHandshake::from_reader_async(&mut tcp).await?;
@@ -347,13 +428,14 @@ impl TorrentSession {
         }
 
         let peer = self.on_handshake_done(peer_handshake, tcp).await?;
-        Ok(peer)
+        return Ok(peer);
     }
 
     async fn start_tick(
         &self,
         peer_addr_rx: mpsc::Receiver<SocketAddr>,
         peer_req_rx: mpsc::Receiver<(Peer, PieceInfo)>,
+        peer_to_poll_rx: mpsc::Receiver<HashId>,
     ) {
         let mut long_term = self.long_term_tasks.write().await;
         long_term.spawn(self.clone().tick_announce());
@@ -361,6 +443,7 @@ impl TorrentSession {
         long_term.spawn(self.clone().tick_peer_req(peer_req_rx));
         long_term.spawn(self.clone().tick_connect_peer(peer_addr_rx));
         long_term.spawn(self.clone().tick_consume_short_term_task());
+        long_term.spawn(self.clone().poll_peer(peer_to_poll_rx));
     }
 
     async fn ext_handshake(
@@ -392,17 +475,10 @@ impl TorrentSession {
     }
 
     async fn on_handshake_done(&self, peer_handshake: BTHandshake, tcp: TcpStream) -> Result<Peer> {
-        let (peer, msg_rx) = Peer::attach(peer_handshake.clone(), tcp).await?;
+        let (peer, msg_rx) = Peer::attach(peer_handshake.clone(), tcp, Default::default()).await?;
         debug!(peer = ?peer, "attach new peer");
-        let mut peers = self.peers.write().await;
-
-        // we only use peer_id to detect duplicate peer.
-        // some peers who behind NAT will got same IP addresses
-        let exists = peers
-            .iter()
-            .any(|peer| peer.peer_id != peer_handshake.peer_id);
-        if !exists {
-            peers.push(peer.clone());
+        if !self.peers.contains_key(&peer.peer_id) {
+            self.peers.insert(peer.peer_id, peer.clone());
         } else {
             peer.shutdown().await?;
             return Err(Error::Generic("duplicate peer".into()));
@@ -414,7 +490,6 @@ impl TorrentSession {
                     .await?;
             }
         }
-        peers.push(peer.clone());
         let mut short_term = self.short_term_tasks.write().await;
         short_term.spawn(self.clone().tick_peer_message(peer.clone(), msg_rx));
         Ok(peer)
@@ -472,31 +547,69 @@ impl TorrentSession {
         }
     }
 
+    async fn connect_peer_addr(&mut self, addr: SocketAddr) -> Result<()> {
+        let proxy_config = self.cfg.read().await.proxy.clone();
+        let tcp: TcpStream;
+        debug!("try active handshake");
+        if let Some(proxy_config) = proxy_config.as_ref() {
+            match proxy_config.r#type {
+                ProxyType::Socks5 => {
+                    let proxy_client = Socks5Client::new(proxy_config.to_socks5_addr().unwrap());
+                    tcp = proxy_client.connect(addr).await?;
+                }
+                _ => {
+                    return Err(Error::Generic("not support proxy type".into()));
+                }
+            }
+        } else {
+            // TODO: handle io error
+            tcp = TcpStream::connect(addr).await?;
+        }
+        match self.active_handshake_with_tcp(tcp).await {
+            Ok(_peer) => {
+                debug!("active handshake success");
+            }
+            Err(e) => {
+                error!(err = ?e, "connect peer");
+            }
+        };
+        Ok(())
+    }
+
+    async fn search_peer_and_connect(&mut self) -> Result<()> {
+        let exists_peers = {
+            let m: HashSet<SocketAddr> = self.peers.iter().map(|peer| peer.addr).collect();
+            m
+        };
+        let peers = self.dht.get_peers(&self.info_hash).await;
+
+        'inner: for addr in peers {
+            if exists_peers.contains(&addr) {
+                continue 'inner;
+            }
+            self.connect_peer_addr(addr).await?;
+        }
+        return Ok(());
+    }
+
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]
-    async fn tick_announce(self) {
+    async fn do_announce(&mut self) -> Result<()> {
+        debug!("announce lsd");
+        self.lsd.announce(&self.info_hash).await?;
+        self.dht.announce(&self.info_hash, self.listen_addr).await?;
+        self.search_peer_and_connect().await?;
+        Ok(())
+    }
+
+    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
+    async fn tick_announce(mut self) {
+        let cancel = self.cancel.clone();
+
         let t = async {
             loop {
-                self.lsd.announce(&self.info_hash).await?;
-                let exists_peers = {
-                    let peers = self.peers.read().await;
-                    let m: HashSet<SocketAddr> = peers.iter().map(|peer| peer.addr).collect();
-                    m
-                };
-                let peers = self.dht.get_peers(&self.info_hash).await;
-
-                'inner: for addr in peers {
-                    if exists_peers.contains(&addr) {
-                        continue 'inner;
-                    }
-                    // TODO: handle io error
-                    let tcp = TcpStream::connect(addr).await?;
-                    debug!(local_addr =?tcp.local_addr(), peer_addr = ?tcp.peer_addr(), "try active handshake");
-                    match self.active_handshake(tcp).await {
-                        Ok(_peer) => {}
-                        Err(e) => {
-                            error!(err = ?e, "connect peer");
-                        }
-                    }
+                let r = self.do_announce().await;
+                if r.is_err() {
+                    return r;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             }
@@ -510,7 +623,7 @@ impl TorrentSession {
                     Err(e) => error!(err = ?e, "tick announce")
                 }
             },
-            _ = self.cancel.cancelled() => {}
+            _ = cancel.cancelled() => {}
         }
     }
 
@@ -553,8 +666,12 @@ impl TorrentSession {
         Ok(())
     }
 
-    async fn handle_req_metadata(&self, peer: &Peer) -> Result<()> {
+    async fn handle_req_metadata(&self, peer_id: HashId) -> Result<()> {
         // bep-009
+        let peer = self
+            .peers
+            .get(&peer_id)
+            .ok_or(Error::Generic("peer not found".to_owned()))?;
 
         let mut metadata_pm = self.metadata_sm.write().await;
 
@@ -601,14 +718,16 @@ impl TorrentSession {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
-    async fn handle_peer(&self, peer: &Peer) -> Result<()> {
+    #[instrument(skip_all, fields(peer_id=?peer_id))]
+    async fn handle_peer(&self, peer_id: HashId) -> Result<()> {
         let torrent_exists = { self.torrent.read().await.is_some() };
 
-        if !torrent_exists && self.support_ut_metadata(peer) {
-            self.handle_req_metadata(peer).await?;
+        if !torrent_exists && self.support_ut_metadata(peer_id) {
+            self.handle_req_metadata(peer_id).await?;
             return Ok(());
         }
+
+        let peer = self.peers.iter().find(|p| p.peer_id == peer_id).unwrap();
 
         let state = { peer.state.read().await.clone() };
 
@@ -639,6 +758,7 @@ impl TorrentSession {
 
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     async fn tick_check_peer(self) {
+        debug!("tick check peer");
         let t = async {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -647,43 +767,61 @@ impl TorrentSession {
                     let mut pm = self.sm.write().await;
                     log_man.sync(&mut pm)?;
                 }
-                let mut broken_peers = vec![];
-                let peers = { self.peers.read().await.clone() };
+                // let mut broken_peers = vec![];
+                let candidate_peer_id =
+                    { self.peers.iter().map(|p| p.peer_id).collect::<Vec<_>>() };
 
-                for peer in peers {
-                    {
-                        let state = peer.state.read().await;
-                        let mut log_man = self.piece_activity_man.write().await;
-                        log_man.sync_peer_pieces(&peer.peer_id, &state.owned_pieces)?;
-                    }
-                    self.handle_peer(&peer).await?;
-                    let broken = { peer.state.read().await.broken.clone() };
-                    if let Some(reason) = broken {
-                        broken_peers.push((peer, reason));
-                    }
+                for peer_id in candidate_peer_id {
+                    debug!(?peer_id, "check peer");
+                    self.peer_to_poll_tx.send(peer_id).await.unwrap();
                 }
+            }
+        };
 
-                if broken_peers.is_empty() {
-                    continue;
+        let cancel = self.cancel.clone();
+        tokio::select! {
+            r = t => {
+                let r: Result<()> = r;
+                if let Err(err) = r {
+                    error!(?err, "tick check peer")
                 }
-                {
-                    let broken_addr: HashSet<SocketAddr> =
-                        broken_peers.iter().map(|(p, _)| p.addr).collect();
+            },
+            _ =  cancel.cancelled() => {
+                debug!("tick_check_peer stop")
+            }
+        }
+    }
 
-                    let mut peers = self.peers.write().await;
-                    peers.retain(|p| !broken_addr.contains(&p.addr))
-                }
-                let mut short_term = self.short_term_tasks.write().await;
-                for (peer, err) in broken_peers {
-                    debug!(peer = ?peer.addr, err= ?err, "remove broken peer");
-                    short_term.spawn(async move {
-                        match peer.shutdown().await {
-                            Ok(()) => {}
-                            Err(err) => {
-                                error!(?err, "shutdown broken peer");
+    #[instrument(skip_all, fields(info_hash=?self.info_hash))]
+    async fn poll_peer(self, mut rx: mpsc::Receiver<HashId>) {
+        let t = async {
+            loop {
+                match rx.try_recv() {
+                    Ok(peer_id) => {
+                        debug!(?peer_id, "poll peer");
+                        if let Some(peer) = self.peers.get(&peer_id) {
+                            let state = peer.state.read().await;
+                            let mut log_man = self.piece_activity_man.write().await;
+                            log_man.sync_peer_pieces(&peer.peer_id, &state.owned_pieces)?;
+                        }
+                        self.handle_peer(peer_id).await?;
+
+                        let mut is_broken = false;
+
+                        if let Some(peer) = self.peers.get(&peer_id) {
+                            if let Some(broken) = peer.state.read().await.broken.as_ref() {
+                                peer.shutdown().await?;
+                                is_broken = true;
                             }
                         }
-                    });
+                        if is_broken {
+                            self.peers.remove(&peer_id);
+                        }
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
                 }
             }
         };
@@ -692,11 +830,11 @@ impl TorrentSession {
             r = t => {
                 let r: Result<()> = r;
                 if let Err(err) = r {
-                    error!(?err, "tick check peer")
+                    error!(?err, "tick check peer message")
                 }
             },
-            _ =  self.cancel.cancelled() => {
-                debug!("tick_check_peer stop")
+            _ = self.cancel.cancelled() => {
+                debug!("tick_peer_message stop")
             }
         }
     }
@@ -828,7 +966,11 @@ impl TorrentSession {
         }
     }
 
-    fn support_ut_metadata(&self, peer: &Peer) -> bool {
+    fn support_ut_metadata(&self, peer_id: HashId) -> bool {
+        let peer = match self.peers.get(&peer_id) {
+            Some(peer) => peer,
+            None => return false,
+        };
         match (
             &self.handshake_template.ext_handshake,
             &peer.handshake.ext_handshake,
@@ -843,9 +985,7 @@ impl TorrentSession {
 
     #[instrument(skip_all)]
     pub async fn add_peer_with_addr(&self, addr: impl ToSocketAddrs) -> Result<Peer> {
-        let tcp = TcpStream::connect(addr).await?;
-        debug!(local_addr =?tcp.local_addr(), peer_addr = ?tcp.peer_addr(), "manually add peer");
-        self.active_handshake(tcp).await
+        return self.active_handshake_with_addr(addr).await;
     }
 
     pub fn status(&self) -> TorrentSessionStatus {
@@ -870,9 +1010,10 @@ impl TorrentSession {
     pub async fn stop(&self) -> Result<()> {
         self.announce_tracker_event(tracker::Event::Stopped).await?;
         {
-            for peer in self.peers.write().await.drain(..) {
+            for peer in self.peers.iter() {
                 peer.shutdown().await?;
             }
+            self.peers.clear();
         }
         {
             let mut pm = self.sm.write().await;
@@ -920,7 +1061,7 @@ impl TorrentSession {
         self.tracker.clone()
     }
 
-    pub fn peers(&self) -> Arc<RwLock<Vec<Peer>>> {
+    pub fn peers(&self) -> Arc<dashmap::DashMap<HashId, Peer>> {
         Arc::clone(&self.peers)
     }
 }
