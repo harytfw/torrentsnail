@@ -1,14 +1,13 @@
 use crate::app::middleware;
 use crate::app::Application;
+use crate::error::Error;
 use crate::torrent::HashId;
-use crate::Error;
-use axum::http::{HeaderName, Request, StatusCode};
+use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::routing::post;
 use axum::Json;
 use axum::{extract::Path, extract::State, Router};
-use futures::future::join_all;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tower_http::request_id::{
@@ -18,7 +17,7 @@ use tracing::error;
 use tracing::log::info;
 
 use crate::app::models::CreateTorrentSessionRequest;
-use crate::app::models::{ErrorResponse, Pagination, Pong, TorrentSessionInfo};
+use crate::app::models::{CursorPagination, ErrorResponse, Pong, TorrentSessionInfo};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 
 use super::models::AddSessionPeerRequest;
@@ -107,7 +106,7 @@ async fn list_torrent_sessions(State(app): State<Arc<Application>>) -> Response 
         .iter()
         .map(|s| TorrentSessionInfo::from_session(&s))
         .collect();
-    Json(Pagination::new(session_info_list, None)).into_response()
+    Json(CursorPagination::new(session_info_list, None)).into_response()
 }
 
 async fn create_torrent_session(
@@ -144,7 +143,7 @@ async fn list_session_peers(
     let id = HashId::from_hex(&info_hash).unwrap();
     app.get_session(&id)
         .map(|session| {
-            Json(Pagination::new(
+            Json(CursorPagination::new(
                 session
                     .peers()
                     .iter()
@@ -199,5 +198,4 @@ async fn add_session_peer(
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
 }

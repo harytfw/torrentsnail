@@ -96,7 +96,7 @@ pub struct CreateTorrentSessionRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct UpdateTorrentSessionRequest {
     pub info_hash: HashId,
-    pub status: TorrentSessionStatus,
+    pub status: Option<TorrentSessionStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,15 +121,13 @@ impl AddSessionPeerRequest {
     }
 }
 
-pub struct PauseTorrentReq {}
-
 #[derive(Serialize)]
-pub struct Pagination<T: Serialize> {
+pub struct CursorPagination<T: Serialize> {
     value: T,
     next_cursor: Option<String>,
 }
 
-impl<T: Serialize> Pagination<T> {
+impl<T: Serialize> CursorPagination<T> {
     pub fn new(value: T, next_cursor: Option<String>) -> Self {
         Self { value, next_cursor }
     }

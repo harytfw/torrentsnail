@@ -30,16 +30,16 @@ tower = "0.4.13"
 base64 = "0.21.0"
 dashmap = "5.4.0"
 num = "0.4.0"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 
 [dev-dependencies]
-anyhow = "1.0.68"
 dotenv = "0.15.0"
 glob = "0.3.1"
-tracing-subscriber = {version = "0.3.16", features = ["env-filter"] }
-eframe = "0.21.0"
 
-[[example]]
-name = "basic"
+[lib]
+name = "torrentsnail"
+path = "src/lib.rs"
 
-[[example]]
-name = "debugger"
+[[bin]]
+name = "torrentsnail"
+path = "src/main.rs"

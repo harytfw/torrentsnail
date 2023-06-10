@@ -64,7 +64,7 @@ impl From<Action> for u32 {
 
 impl From<Action> for Error {
     fn from(action: Action) -> Self {
-        Self::UnexpectedAction(action)
+        Self::Generic(action.to_string())
     }
 }
 
@@ -196,7 +196,7 @@ impl ConnectResponse {
 
         let action: Action = rdr.read_u32::<BigEndian>()?.into();
         if action != Action::Connect {
-            return Err(Error::UnexpectedAction(action));
+            return Err(Error::Generic(action.to_string()));
         }
 
         let transaction_id = rdr.read_u32::<BigEndian>()?;
@@ -730,13 +730,13 @@ impl std::fmt::Debug for TrackerError {
 
 impl From<TrackerError> for Error {
     fn from(e: TrackerError) -> Self {
-        Self::Tracker(Box::new(e))
+        Self::Generic(e.to_string())
     }
 }
 
 impl From<Box<TrackerError>> for Error {
     fn from(e: Box<TrackerError>) -> Self {
-        Self::Tracker(e)
+        Self::Generic(e.to_string())
     }
 }
 

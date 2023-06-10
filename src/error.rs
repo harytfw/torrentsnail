@@ -1,4 +1,4 @@
-use crate::tracker::{types::Action, TrackerError};
+// use crate::tracker::{types::Action, TrackerError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -14,8 +14,8 @@ pub enum Error {
     SendError(String),
     #[error("{0}")]
     RecvError(String),
-    #[error("unknown action: {0:?}")]
-    UnexpectedAction(Action),
+    // #[error("unknown action: {0:?}")]
+    // UnexpectedAction(Action),
     #[error("bad event value")]
     BadEventValue,
     #[error("validate failed: {0}")]
@@ -24,8 +24,8 @@ pub enum Error {
     Generic(String),
     #[error("cancel")]
     Cancel,
-    #[error("tracker error: {0}")]
-    Tracker(Box<TrackerError>),
+    // #[error("tracker error: {0}")]
+    // Tracker(Box<TrackerError>),
     #[error("no address")]
     NoAddress,
     #[error("timeout")]

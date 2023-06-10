@@ -1,6 +1,30 @@
+pub mod addr;
+pub mod app;
+pub mod bencode;
+pub mod dht;
+mod error;
+pub mod lsd;
+pub mod torrent;
+pub mod tracker;
+pub use error::{Error, Result};
+pub mod magnet;
+pub mod message;
+pub mod proxy;
+pub mod ratelimiter;
+pub mod session;
+
+pub mod config;
+pub mod db;
+pub mod utils;
+
 use tokio::signal;
-use torrentsnail::app::Application;
-use torrentsnail::Result;
+
+use app::Application;
+
+use tracing_subscriber;
+
+
+pub const SNAIL_VERSION: &str = "TorrentSnail 0.0.1";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -15,7 +39,7 @@ async fn main() -> Result<()> {
 
     signal::ctrl_c().await.expect("failed to listen for event");
 
-	app.shutdown().await.unwrap();
+    app.shutdown().await.unwrap();
 
     Ok(())
 }

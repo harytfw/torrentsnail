@@ -16,15 +16,15 @@ use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
 use crate::{bencode, proxy, torrent, tracker, Error, Result, SNAIL_VERSION};
 use core::fmt;
-use std::str::FromStr;
 use num::{FromPrimitive, ToPrimitive};
-use serde::{Serialize, Serializer, Deserialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -341,8 +341,9 @@ impl Serialize for TorrentSessionStatus {
 
 impl<'de> Deserialize<'de> for TorrentSessionStatus {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         let s = String::deserialize(deserializer)?;
         Self::from_str(&s).map_err(serde::de::Error::custom)
     }
