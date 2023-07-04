@@ -39,20 +39,20 @@ impl MagnetURI {
     }
 
     pub fn xt_protocol(&self) -> Option<&str> {
-		let mut s = self.xt.as_str();
+		let s = self.xt.as_str();
 
         let first = self.xt.find(|c| c == ':')? + 1;
-		s = &s[first..];
+		let s = &s[first..];
 
         let end = s.find(|c| c == ':')?;
         Some(&s[..end])
     }
 
     pub fn xt_hash(&self) -> Option<&str> {
-		let mut s = self.xt.as_str();
+		let s = self.xt.as_str();
   
         let pos = s.find(|c| c == ':')?;
-		s = &s[pos+1..];
+		let s = &s[pos+1..];
 
         let pos = s.find(|c| c == ':')?;
         Some(&s[pos+1..])

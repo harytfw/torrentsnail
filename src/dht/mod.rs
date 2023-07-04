@@ -6,12 +6,13 @@ use crate::{Error, Result};
 use bucket::BucketStats;
 use rand::random;
 use serde::Serialize;
-use tracing::instrument;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::ops::Deref;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -20,6 +21,7 @@ use std::{fs, path};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument;
 use tracing::{debug, error};
 
 mod bucket;
@@ -36,7 +38,6 @@ pub use types::{
     GetPeersQuery, GetPeersResponse, PingQuery, PingResponse, Query, QueryResponse, Response,
 };
 
-const ROUTING_TABLE_PATH: &str = "/tmp/dht_routing_table.bin";
 
 #[derive(Clone, Default, Debug, Serialize)]
 pub struct DHTStats {
@@ -133,7 +134,6 @@ impl DHTSender {
         nodes: Option<CompactNodesV4>,
         peers: Option<Vec<SocketAddr>>,
     ) -> Result<()> {
-
         let mut rsp = GetPeersResponse::new(&self.my_id);
         rsp.set_t(t).set_token(token);
 
@@ -207,10 +207,11 @@ pub struct DHTInner {
     last_new_node_at: SystemTime,
     search: BTreeMap<HashId, SearchSession>,
     stats: DHTStats,
+    routing_table_path: PathBuf,
 }
 
 impl DHTInner {
-    fn new(my_id: Arc<HashId>, sock: Arc<UdpSocket>) -> Self {
+    fn new(my_id: Arc<HashId>, sock: Arc<UdpSocket>, routing_table_path: &Path) -> Self {
         Self {
             my_id: Arc::clone(&my_id),
             buckets: vec![Bucket::new(HashId::ZERO_V1)],
@@ -220,6 +221,7 @@ impl DHTInner {
             search: Default::default(),
             sender: DHTSender::new(sock, Arc::clone(&my_id)),
             stats: Default::default(),
+            routing_table_path: routing_table_path.to_path_buf(),
         }
     }
 
@@ -705,15 +707,13 @@ impl DHTInner {
     async fn load_routing_table(&mut self) -> Result<()> {
         use tokio::io::AsyncReadExt;
 
-        let path = path::Path::new(ROUTING_TABLE_PATH);
-
-        if !path.exists() {
+        if !self.routing_table_path.exists() {
             return Ok(());
         }
 
         let mut nodes: Vec<Node> = vec![];
 
-        let file = fs::File::options().read(true).open(path)?;
+        let file = fs::File::options().read(true).open(&self.routing_table_path)?;
         let file = tokio::fs::File::from(file);
         let mut buf = tokio::io::BufReader::new(file);
 
@@ -743,17 +743,17 @@ impl DHTInner {
     async fn save_routing_table(&self) -> Result<()> {
         use tokio::io::AsyncWriteExt;
 
-        debug!("start save routing table");
 
         let t0 = Instant::now();
-
-        let state_path = path::Path::new(ROUTING_TABLE_PATH);
 
         let file = fs::File::options()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(state_path)?;
+            .open(&self.routing_table_path)?;
+        
+        debug!(?self.routing_table_path, "start save routing table");
+
         let file = tokio::fs::File::from(file);
         let mut buf = tokio::io::BufWriter::new(file);
         for bucket in self.buckets.iter() {
@@ -872,9 +872,13 @@ pub struct DHT {
 }
 
 impl DHT {
-    pub fn new(sock: Arc<UdpSocket>, my_id: &HashId) -> Self {
+    pub fn new(sock: Arc<UdpSocket>, my_id: &HashId, routing_table_path: &Path) -> Self {
         let dht = Self {
-            inner: Arc::new(RwLock::new(DHTInner::new(Arc::new(*my_id), sock))),
+            inner: Arc::new(RwLock::new(DHTInner::new(
+                Arc::new(*my_id),
+                sock,
+                routing_table_path,
+            ))),
             cancel: CancellationToken::new(),
         };
         {

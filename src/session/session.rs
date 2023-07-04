@@ -1,5 +1,5 @@
 use crate::app::Application;
-use crate::config::{Config, MutableConfig, ProxyType};
+use crate::config::Config;
 use crate::dht::DHT;
 use crate::lsd::LSD;
 use crate::magnet::MagnetURI;
@@ -14,14 +14,12 @@ use crate::session::storage::StorageManager;
 use crate::session::utils::make_announce_key;
 use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
-use crate::{bencode, proxy, torrent, tracker, Error, Result, SNAIL_VERSION};
+use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
 use core::fmt;
 use num::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize, Serializer};
-use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::hash::Hash;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -33,9 +31,8 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use torrent::{HashId, TorrentInfo};
-use tracing::field::debug;
-use tracing::{debug, error, info, instrument, warn};
+use torrent::{HashId};
+use tracing::{debug, error, info, instrument};
 
 const METADATA_PIECE_SIZE: usize = 16384;
 
@@ -51,7 +48,7 @@ pub struct TorrentSessionBuilder {
     lsd: Option<LSD>,
     my_id: Option<HashId>,
     listen_addr: Option<SocketAddr>,
-    config: Option<MutableConfig>,
+    config: Option<Arc<Config>>,
 }
 
 impl TorrentSessionBuilder {
@@ -153,7 +150,7 @@ impl TorrentSessionBuilder {
         }
     }
 
-    pub fn with_config(self, config: MutableConfig) -> Self {
+    pub fn with_config(self, config: Arc<Config>) -> Self {
         Self {
             config: Some(config),
             ..self
@@ -374,7 +371,7 @@ pub struct TorrentSession {
     tracker: TrackerClient,
     dht: DHT,
     lsd: LSD,
-    cfg: MutableConfig,
+    cfg: Arc<Config>,
     peer_to_poll_tx: mpsc::Sender<HashId>,
     pub name: String,
 }
@@ -549,12 +546,12 @@ impl TorrentSession {
     }
 
     async fn connect_peer_addr(&mut self, addr: SocketAddr) -> Result<()> {
-        let proxy_config = self.cfg.read().await.proxy.clone();
+        let proxy_config = self.cfg.network.proxy.clone();
         let tcp: TcpStream;
         debug!("try active handshake");
         if let Some(proxy_config) = proxy_config.as_ref() {
-            match proxy_config.r#type {
-                ProxyType::Socks5 => {
+            match proxy_config.r#type.as_str() {
+                "socks5" => {
                     let proxy_client = Socks5Client::new(proxy_config.to_socks5_addr().unwrap());
                     tcp = proxy_client.connect(addr).await?;
                 }

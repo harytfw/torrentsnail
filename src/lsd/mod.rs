@@ -5,6 +5,8 @@ use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
+const BROADCAST_ADDR: &str = "239.192.152.143:6771";
+
 #[derive(Clone)]
 pub struct LSD {
     sock: Arc<UdpSocket>,
@@ -24,7 +26,7 @@ impl LSD {
     #[instrument(skip(self))]
     pub async fn announce(&self, info_hash: &HashId) -> Result<()> {
         let buf = self.build_packet(info_hash);
-        self.sock.send_to(&buf, "239.192.152.143:6771").await?;
+        self.sock.send_to(&buf, BROADCAST_ADDR).await?;
         Ok(())
     }
 

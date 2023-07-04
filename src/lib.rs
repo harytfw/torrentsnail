@@ -13,7 +13,6 @@ pub mod proxy;
 pub mod ratelimiter;
 pub mod session;
 
-pub mod utils;
 pub mod db;
 pub mod config;
 

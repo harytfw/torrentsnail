@@ -1,22 +1,21 @@
-use crate::config::{Config, MutableConfig};
+use crate::config::Config;
 use crate::message::BTHandshake;
 use crate::session::{TorrentSession, TorrentSessionBuilder};
 use crate::{dht::DHT, lsd::LSD, torrent::HashId};
 use crate::{Error, Result};
 
+use crate::app::handler::start_server;
 use dashmap::DashMap;
 use rand::random;
-use std::{fs, net::SocketAddr, path, sync::Arc};
+use tracing_subscriber::field::debug;
+use std::path::Path;
+use std::{fs, net::SocketAddr, sync::Arc};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
-    sync::RwLock,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, instrument, Instrument};
-
-use crate::app::handler::start_server;
-pub const MAX_FRAGMENT_LENGTH: usize = 16 << 10;
 
 #[derive(Clone)]
 pub struct Application {
@@ -25,21 +24,59 @@ pub struct Application {
     dht: DHT,
     lsd: LSD,
     sessions: Arc<DashMap<HashId, TorrentSession>>,
-    pub cancel: CancellationToken,
-    config: MutableConfig,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) config: Arc<Config>,
+}
+
+fn load_id(id_path: &Path) -> Result<HashId> {
+    if id_path.exists() {
+        let id = fs::read(id_path)?;
+        assert_eq!(id.len(), 20);
+        return HashId::from_slice(&id);
+    }
+    let id: [u8; 20] = random();
+    debug!(id = ?id, id_path = ?id_path, "generate new id");
+    fs::write(id_path, id)?;
+    Ok(id.into())
 }
 
 impl Application {
-    pub async fn start() -> Result<Arc<Self>> {
-        let listen_addr: Arc<SocketAddr> = Arc::new("0.0.0.0:8081".parse()?);
+    pub async fn from_config(config: Config) -> Result<Arc<Self>> {
+        debug!(?config, "dump config");
 
-        let my_id = Arc::new(Self::load_id()?);
+        let config = Arc::new(config);
+
+        if !Path::new(&config.data_dir).exists() {
+            fs::create_dir_all(&config.data_dir)?;
+        }
+
+        let listen_addr: Arc<SocketAddr> = Arc::new(
+            format!(
+                "{}:{}",
+                config.network.bind_interface, config.network.torrent_port
+            )
+            .parse()?,
+        );
+
+        debug!("setup my_id");
+        let my_id = Arc::new(load_id(&config.id_path())?);
+
+        debug!(?listen_addr, "setup udp socket");
         let udp = Arc::new(UdpSocket::bind(listen_addr.as_ref()).await?);
 
-        let dht = { DHT::new(udp.clone(), &my_id) };
+        debug!("setup dht");
+        let dht = DHT::new(udp.clone(), &my_id, &config.routing_table_path());
+
         dht.load_routing_table().await?;
 
-        let lsd = { LSD::new(Arc::clone(&udp), "192.168.2.56", 8081) };
+        debug!("setup lsd");
+        let lsd = {
+            LSD::new(
+                Arc::clone(&udp),
+                &config.network.bind_interface,
+                config.network.torrent_port,
+            )
+        };
 
         let app = Arc::new(Self {
             my_id,
@@ -48,18 +85,21 @@ impl Application {
             sessions: Arc::new(DashMap::new()),
             cancel: CancellationToken::new(),
             listen_addr: Arc::clone(&listen_addr),
-            config: MutableConfig::new(RwLock::new(Config::default())),
+            config: Arc::clone(&config),
         });
         {
+            debug!(?listen_addr, "setup tcp listener");
             let tcp = TcpSocket::new_v4()?;
             tcp.bind(*listen_addr)?;
-            let listener = tcp.listen(20)?;
+            let listener = tcp.listen(config.network.tcp_backlog)?;
             tokio::spawn(Arc::clone(&app).accept_tcp(listener));
         }
         {
+            debug!("setup udp receiver");
             tokio::spawn(Arc::clone(&app).recv_udp(Arc::clone(&udp)));
         }
         {
+            debug!("start http server");
             tokio::spawn(start_server(Arc::clone(&app)));
         }
         Ok(app)
@@ -138,19 +178,6 @@ impl Application {
         if let Err(e) = tcp.shutdown().await {
             error!(err = ?e);
         }
-    }
-
-    fn load_id() -> Result<HashId> {
-        let id_path = path::Path::new("/tmp/dht.id");
-        if id_path.exists() {
-            let id = fs::read(id_path)?;
-            assert_eq!(id.len(), 20);
-            return HashId::from_slice(&id);
-        }
-        let id: [u8; 20] = random();
-        debug!(id = ?id, "generate new id");
-        fs::write(id_path, id)?;
-        Ok(id.into())
     }
 
     pub async fn shutdown(self: &Arc<Self>) -> Result<()> {

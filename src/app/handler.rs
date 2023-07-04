@@ -8,13 +8,13 @@ use axum::routing::get;
 use axum::routing::post;
 use axum::Json;
 use axum::{extract::Path, extract::State, Router};
+use tracing::debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tower_http::request_id::{
     MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
 use tracing::error;
-use tracing::log::info;
 
 use crate::app::models::CreateTorrentSessionRequest;
 use crate::app::models::{CursorPagination, ErrorResponse, Pong, TorrentSessionInfo};
@@ -31,7 +31,7 @@ struct MyMakeRequestId {
 }
 
 impl MakeRequestId for MyMakeRequestId {
-    fn make_request_id<B>(&mut self, request: &Request<B>) -> Option<RequestId> {
+    fn make_request_id<B>(&mut self, _request: &Request<B>) -> Option<RequestId> {
         let request_id = self
             .counter
             .fetch_add(1, Ordering::SeqCst)
@@ -78,9 +78,14 @@ pub async fn start_server(app: Arc<Application>) {
         )
         .with_state(Arc::clone(&app));
 
-    info!("listen http server with addr: 0.0.0.0:3000");
+    let bind_addr = format!(
+        "{}:{}",
+        app.config.network.bind_interface, app.config.network.http_port
+    );
 
-    let t = axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
+    debug!(bind_addr, "listen http server");
+
+    let t = axum::Server::bind(&bind_addr.parse().unwrap())
         .serve(router.into_make_service())
         .with_graceful_shutdown(async move { cancel_clone.cancelled().await });
 
@@ -197,5 +202,4 @@ async fn add_session_peer(
     StatusCode::ACCEPTED.into_response()
 }
 #[cfg(test)]
-mod tests {
-}
+mod tests {}
