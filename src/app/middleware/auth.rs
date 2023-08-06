@@ -3,7 +3,6 @@ use axum::headers::{self, Header};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{body::Body, http::Request};
-use base64::{engine::general_purpose, Engine as _};
 use futures::future::BoxFuture;
 use std::task::{Context, Poll};
 
@@ -120,13 +119,14 @@ impl BasicAuthorization {
 }
 
 fn parse_basic_authorization(value: &str) -> Option<BasicAuthorization> {
+    use base64::Engine as _;
     let mut parts = value.splitn(2, ' ');
     if parts.next()? != "Basic" {
         return None;
     }
 
     let base64_value = parts.next()?;
-    let decoded = general_purpose::STANDARD
+    let decoded = base64::engine::general_purpose::STANDARD
         .decode(base64_value.as_bytes())
         .ok()?;
 
