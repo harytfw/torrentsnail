@@ -2,8 +2,7 @@ use crate::Result;
 use std::fs;
 use std::{
     net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::{PathBuf},
 };
 
 #[derive(Debug, Clone)]

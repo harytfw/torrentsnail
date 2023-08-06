@@ -98,10 +98,10 @@ pub async fn start_server(app: Arc<Application>) {
 }
 
 async fn handler_echo(d: Json<String>) -> Json<String> {
-    return d;
+    d
 }
 
-async fn handler_ping(State(app): State<Arc<Application>>) -> Json<Pong> {
+async fn handler_ping(State(_app): State<Arc<Application>>) -> Json<Pong> {
     Json(Pong::new())
 }
 
@@ -126,17 +126,17 @@ async fn create_torrent_session(
     };
     match builder.build().await {
         Ok(session) => {
-            return Json(TorrentSessionInfo::from_session(&session)).into_response();
+            Json(TorrentSessionInfo::from_session(&session)).into_response()
         }
         Err(e) => {
-            return Json(ErrorResponse::from(e)).into_response();
+            Json(ErrorResponse::from(e)).into_response()
         }
-    };
+    }
 }
 
 async fn update_torrent_session(
-    State(app): State<Arc<Application>>,
-    req: Json<UpdateTorrentSessionRequest>,
+    State(_app): State<Arc<Application>>,
+    _req: Json<UpdateTorrentSessionRequest>,
 ) -> Response {
     unimplemented!()
 }
@@ -145,7 +145,7 @@ async fn list_session_peers(
     State(app): State<Arc<Application>>,
     Path(info_hash): Path<String>,
 ) -> Response {
-    let id = HashId::from_hex(&info_hash).unwrap();
+    let id = HashId::from_hex(info_hash).unwrap();
     app.get_session(&id)
         .map(|session| {
             Json(CursorPagination::new(

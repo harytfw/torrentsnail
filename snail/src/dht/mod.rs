@@ -8,6 +8,7 @@ use rand::random;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::ops::Deref;
@@ -17,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
-use std::{fs, path};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -629,7 +629,6 @@ impl DHTInner {
             let handle = tokio::spawn(async move {
                 let addr = addr;
                 sender.send_ping(&addr).await;
-                ()
             });
             ping_handles.push(handle);
         }

@@ -937,7 +937,7 @@ impl_serde!(
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::fs;
+    
 
     #[test]
     fn test_connect_request() -> Result<()> {

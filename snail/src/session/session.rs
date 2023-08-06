@@ -15,7 +15,6 @@ use crate::session::utils::make_announce_key;
 use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
 use crate::{torrent, tracker, Error, Result, SNAIL_VERSION};
-
 use core::fmt;
 use num::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize, Serializer};
@@ -83,7 +82,7 @@ impl TorrentSessionBuilder {
         }
     }
 
-    pub fn with_display_name(self, name: &str) -> Self {
+    pub fn with_display_name(self, _name: &str) -> Self {
         // TODO:
         self
     }
@@ -238,7 +237,7 @@ impl TorrentSessionBuilder {
                 .as_ref()
                 .map(|t| t.info.name.to_string())
                 .unwrap_or_else(|| info_hash.hex()),
-            tracker: tracker,
+            tracker,
             peers: Arc::new(dashmap::DashMap::new()),
             info_hash: Arc::new(info_hash),
             metadata_sm: Arc::new(RwLock::new(metadata_cache)),
@@ -259,7 +258,7 @@ impl TorrentSessionBuilder {
             my_id: self.my_id.unwrap(),
             listen_addr: self.listen_addr.unwrap(),
             cfg: self.config.unwrap(),
-            peer_to_poll_tx: peer_to_poll_tx,
+            peer_to_poll_tx,
         };
         {
             let ts_clone = ts.clone();
@@ -405,7 +404,7 @@ impl TorrentSession {
     #[instrument(skip_all, fields(info_hash=?self.info_hash))]
     pub async fn active_handshake_with_addr(&self, addr: impl ToSocketAddrs) -> Result<Peer> {
         let tcp = TcpStream::connect(addr).await?;
-        return self.active_handshake_with_tcp(tcp).await;
+        self.active_handshake_with_tcp(tcp).await
     }
 
     #[instrument(skip_all, fields(info_hash=?self.info_hash))]
@@ -427,7 +426,7 @@ impl TorrentSession {
         }
 
         let peer = self.on_handshake_done(peer_handshake, tcp).await?;
-        return Ok(peer);
+        Ok(peer)
     }
 
     async fn start_tick(
@@ -588,7 +587,7 @@ impl TorrentSession {
             }
             self.connect_peer_addr(addr).await?;
         }
-        return Ok(());
+        Ok(())
     }
 
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]
@@ -606,10 +605,7 @@ impl TorrentSession {
 
         let t = async {
             loop {
-                let r = self.do_announce().await;
-                if r.is_err() {
-                    return r;
-                }
+                self.do_announce().await?;
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             }
         };
@@ -808,7 +804,8 @@ impl TorrentSession {
                         let mut is_broken = false;
 
                         if let Some(peer) = self.peers.get(&peer_id) {
-                            if let Some(broken) = peer.state.read().await.broken.as_ref() {
+                            if let Some(broken_reason) = peer.state.read().await.broken.as_ref() {
+                                info!(?broken_reason, ?peer_id, "peer broken");
                                 peer.shutdown().await?;
                                 is_broken = true;
                             }
@@ -984,7 +981,7 @@ impl TorrentSession {
 
     #[instrument(skip_all)]
     pub async fn add_peer_with_addr(&self, addr: impl ToSocketAddrs) -> Result<Peer> {
-        return self.active_handshake_with_addr(addr).await;
+        self.active_handshake_with_addr(addr).await
     }
 
     pub fn status(&self) -> TorrentSessionStatus {

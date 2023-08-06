@@ -3,7 +3,7 @@ use crate::Result;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 const BROADCAST_ADDR: &str = "239.192.152.143:6771";
 

@@ -3,7 +3,7 @@ use tokio::signal;
 use torrentsnail::app::Application;
 use torrentsnail::config::Config;
 use torrentsnail::Result;
-use tracing_subscriber;
+
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]

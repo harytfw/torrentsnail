@@ -1,5 +1,4 @@
 use crate::Result;
-use axum::headers::{self, Header};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{body::Body, http::Request};
@@ -60,7 +59,7 @@ where
             .get("Authorization")
             .and_then(|h| h.to_str().ok());
 
-        let basic_auth = auth_value.and_then(|v| parse_basic_authorization(v));
+        let basic_auth = auth_value.and_then(parse_basic_authorization);
 
         let mut auth_exists = false;
         let mut auth_ok = false;
@@ -75,7 +74,7 @@ where
         if !auth_exists {
             return Box::pin(async move {
                 let response = (StatusCode::UNAUTHORIZED, "missing authorization").into_response();
-                return Ok(response);
+                Ok(response)
             });
         }
 
@@ -86,16 +85,16 @@ where
                     "bad username or password".to_string(),
                 )
                     .into_response();
-                return Ok(response);
+                Ok(response)
             });
         }
 
         let future = self.inner.call(request);
 
-        return Box::pin(async move {
+        Box::pin(async move {
             let response: Response = future.await?;
             Ok(response)
-        });
+        })
     }
 }
 
@@ -131,12 +130,12 @@ fn parse_basic_authorization(value: &str) -> Option<BasicAuthorization> {
         .ok()?;
 
     let username_password = String::from_utf8_lossy(&decoded);
-    let mut username_password_parts = username_password.splitn(2, ':');
+    let (username, password) = username_password.split_once(':')?;
 
-    let username = username_password_parts.next()?;
-    let password = username_password_parts.next()?;
+    
+    
 
-    return Some(BasicAuthorization::new(username, password));
+    Some(BasicAuthorization::new(username, password))
 }
 
 #[cfg(test)]

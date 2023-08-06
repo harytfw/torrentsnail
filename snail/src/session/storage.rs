@@ -1,10 +1,10 @@
 use crate::session::file::{FileFragment, FilePieceMap, FilePieceMapBuilder};
 use crate::session::piece::Piece;
 use crate::session::utils::calc_piece_num;
-use crate::torrent::{HashId, TorrentInfo};
+use crate::torrent::{TorrentInfo};
 use crate::{Error, Result};
 use bit_vec::BitVec;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -1,9 +1,5 @@
 use super::{Error, Result, Value};
-use std::{
-    collections::BTreeMap,
-    io::{Read},
-    slice,
-};
+use std::{collections::BTreeMap, io::Read, slice};
 
 pub struct Decoder<R> {
     input: R,

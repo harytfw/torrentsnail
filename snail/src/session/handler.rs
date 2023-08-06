@@ -1,12 +1,12 @@
+use crate::Result;
 use crate::{
     message::{
         BTExtMessage, BTMessage, LTDontHaveMessage, UTMetadataMessage, UTMetadataPieceData,
-        MSG_UT_METADATA,
+        MSG_LT_DONTHAVE, MSG_UT_METADATA,
     },
     session::{storage::StorageManager, Peer, TorrentSession},
     torrent::{HashId, TorrentFile, TorrentInfo},
 };
-use crate::{Error, Result};
 use tracing::{debug, instrument, warn};
 impl TorrentSession {
     #[instrument(skip_all, fields(peer_id=?peer.peer_id))]

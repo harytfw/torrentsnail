@@ -67,7 +67,7 @@ impl Socks5Addr {
                 reader.read_exact(&mut buf).await?;
                 Ok(Self::IPv6(Ipv6Addr::from(buf)))
             }
-            _ => Err(Error::Socks5(format!("unknown type: {}", t).into())),
+            _ => Err(Error::Socks5(format!("unknown type: {}", t))),
         }
     }
 }
@@ -124,7 +124,7 @@ impl Socks5Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{SocketAddr, ToSocketAddrs};
+    use std::net::{ToSocketAddrs};
 
     #[tokio::test]
     #[allow(unreachable_code)]

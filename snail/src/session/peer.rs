@@ -81,13 +81,8 @@ impl From<BTMessage> for PeerMessage {
     }
 }
 
+#[derive(Default)]
 pub struct PeerConfig {}
-
-impl Default for PeerConfig {
-    fn default() -> Self {
-        Self {}
-    }
-}
 
 #[derive(Clone)]
 pub struct Peer {
@@ -149,8 +144,8 @@ impl Peer {
             msg_tcp_tx,
             msg_tx,
             cancel: CancellationToken::new(),
-            addr: addr,
-            peer_id: handshake.peer_id.into(),
+            addr,
+            peer_id: handshake.peer_id,
             handshake: Arc::new(handshake),
             tasks: Default::default(),
             cfg: Arc::new(cfg),

@@ -7,7 +7,7 @@ use crate::{Error, Result};
 use crate::app::handler::start_server;
 use dashmap::DashMap;
 use rand::random;
-use tracing_subscriber::field::debug;
+
 use std::path::Path;
 use std::{fs, net::SocketAddr, sync::Arc};
 use tokio::{
