@@ -1,9 +1,13 @@
-use tracing::{debug, instrument, warn};
 use crate::{
-    message::{BTMessage, BTExtMessage, UTMetadataMessage, LTDontHaveMessage, MSG_UT_METADATA, UTMetadataPieceData},
-    session::{Peer, TorrentSession, storage::StorageManager}, torrent::{HashId, TorrentInfo, TorrentFile}, bencode,
+    message::{
+        BTExtMessage, BTMessage, LTDontHaveMessage, UTMetadataMessage, UTMetadataPieceData,
+        MSG_UT_METADATA,
+    },
+    session::{storage::StorageManager, Peer, TorrentSession},
+    torrent::{HashId, TorrentFile, TorrentInfo},
 };
 use crate::{Error, Result};
+use tracing::{debug, instrument, warn};
 impl TorrentSession {
     #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
     pub(crate) async fn handle_message(&self, peer: &Peer, msg: &BTMessage) -> Result<()> {

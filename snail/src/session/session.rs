@@ -14,7 +14,8 @@ use crate::session::storage::StorageManager;
 use crate::session::utils::make_announce_key;
 use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
-use crate::{bencode, torrent, tracker, Error, Result, SNAIL_VERSION};
+use crate::{torrent, tracker, Error, Result, SNAIL_VERSION};
+
 use core::fmt;
 use num::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize, Serializer};
@@ -31,7 +32,7 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use torrent::{HashId};
+use torrent::HashId;
 use tracing::{debug, error, info, instrument};
 
 const METADATA_PIECE_SIZE: usize = 16384;

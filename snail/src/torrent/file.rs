@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use crate::{Result, Error};
 
-use crate::{bencode, Result};
-use crate::{bencode::to_bytes, Error};
 use serde::{Deserialize, Serialize};
 
 use super::HashId;
@@ -74,7 +73,7 @@ impl TorrentInfo {
 
     pub fn info_hash(&self) -> Result<HashId> {
         // FIXME: support bit torrent v2
-        let buf = to_bytes(&self)?;
+        let buf = bencode::to_bytes(&self)?;
         let info_hash = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &buf);
         let hash = info_hash
             .as_ref()
@@ -219,8 +218,6 @@ mod test {
     use super::*;
     use std::fs;
 
-    use crate::bencode::from_bytes;
-
     #[test]
     fn parse_torrent() {
         struct TorrentTest {
@@ -249,7 +246,7 @@ mod test {
             ),
         ] {
             let data = fs::read(test_case.path).expect("read torrent");
-            let tf: TorrentFile = from_bytes(&data).expect("decode");
+            let tf: TorrentFile = bencode::from_bytes(&data).expect("decode");
 
             assert_eq!(tf.info_hash().unwrap(), test_case.info_hash);
         }

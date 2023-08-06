@@ -60,6 +60,8 @@ pub enum Error {
     Magnet(String),
     #[error("socks5: {0}")]
     Socks5(String),
+    #[error("bencode: {0}")]
+    Bencode(#[from] bencode::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

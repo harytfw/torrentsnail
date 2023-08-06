@@ -1,14 +1,15 @@
-mod de;
-mod decoder;
-mod encoder;
-mod ser;
-mod value;
-use crate::{Error, Result};
-use de::Deserializer;
+pub mod de;
+pub mod decoder;
+pub mod encoder;
+pub mod error;
+pub mod ser;
+pub mod value;
+pub use de::Deserializer;
 pub use decoder::Decoder;
 pub use encoder::Encoder;
-use ser::Serializer;
-use serde::{Deserialize, Serialize};
+pub use error::{Error, Result};
+pub use ser::Serializer;
+pub use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
 pub use value::{Value, ValueVisitor};
 

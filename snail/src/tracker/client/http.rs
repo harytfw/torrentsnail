@@ -1,4 +1,3 @@
-use crate::bencode;
 use crate::tracker::client::SessionState;
 use crate::tracker::types::*;
 use crate::{Error, Result};
@@ -55,7 +54,7 @@ impl Session {
                         error!(?val);
                         Err(Error::Generic("decode response failed".into()))
                     }
-                    Err(err) => Err(err),
+                    Err(err) => Err(Error::Bencode(err)),
                 }
             }
             code => Err(Error::Generic(format!("http code: {code}"))),

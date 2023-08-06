@@ -1,6 +1,5 @@
 pub mod addr;
 pub mod app;
-pub mod bencode;
 pub mod dht;
 mod error;
 pub mod lsd;

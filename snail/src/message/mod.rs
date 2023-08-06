@@ -1,5 +1,4 @@
 use crate::addr::IpAddrBytes;
-use crate::bencode;
 use crate::torrent::HashId;
 use crate::{Error, Result};
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};

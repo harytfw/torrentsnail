@@ -1,9 +1,9 @@
 use crate::{
-    bencode::Value,
     session::{Peer, TorrentSession, TorrentSessionStatus},
     torrent::HashId,
     Error, Result,
 };
+use bencode::Value;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;

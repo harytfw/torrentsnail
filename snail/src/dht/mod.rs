@@ -1,8 +1,8 @@
 use crate::addr::CompactNodesV4;
 use crate::addr::SocketAddrWithId;
-use crate::bencode::to_bytes;
 use crate::torrent::HashId;
 use crate::{Error, Result};
+use bencode::to_bytes;
 use bucket::BucketStats;
 use rand::random;
 use serde::Serialize;
@@ -37,7 +37,6 @@ pub use types::{
     AnnouncePeerQuery, AnnouncePeerResponse, DHTError, FindNodeQuery, FindNodeResponse,
     GetPeersQuery, GetPeersResponse, PingQuery, PingResponse, Query, QueryResponse, Response,
 };
-
 
 #[derive(Clone, Default, Debug, Serialize)]
 pub struct DHTStats {
@@ -713,7 +712,9 @@ impl DHTInner {
 
         let mut nodes: Vec<Node> = vec![];
 
-        let file = fs::File::options().read(true).open(&self.routing_table_path)?;
+        let file = fs::File::options()
+            .read(true)
+            .open(&self.routing_table_path)?;
         let file = tokio::fs::File::from(file);
         let mut buf = tokio::io::BufReader::new(file);
 
@@ -743,7 +744,6 @@ impl DHTInner {
     async fn save_routing_table(&self) -> Result<()> {
         use tokio::io::AsyncWriteExt;
 
-
         let t0 = Instant::now();
 
         let file = fs::File::options()
@@ -751,7 +751,7 @@ impl DHTInner {
             .create(true)
             .truncate(true)
             .open(&self.routing_table_path)?;
-        
+
         debug!(?self.routing_table_path, "start save routing table");
 
         let file = tokio::fs::File::from(file);

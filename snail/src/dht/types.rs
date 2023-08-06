@@ -1,7 +1,7 @@
 use crate::addr::{CompactNodesV4, SocketAddrBytes, SocketAddrWithId};
-use crate::bencode::from_bytes;
 use crate::torrent::HashId;
 use crate::{Error, Result};
+use bencode::from_bytes;
 use serde::{Deserialize, Serialize};
 
 use std::fmt::Debug;
@@ -568,11 +568,10 @@ impl QueryResponse {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::bencode::{from_str, to_string};
     macro_rules! test_packet {
         ($typ:ty, $packet:expr) => {{
-            let obj: $typ = from_str($packet)?;
-            let ser = to_string(&obj)?;
+            let obj: $typ = bencode::from_str($packet)?;
+            let ser = bencode::to_string(&obj)?;
             assert_eq!(ser, $packet);
             obj
         }};

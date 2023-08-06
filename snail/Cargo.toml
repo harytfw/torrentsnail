@@ -1,0 +1,45 @@
+[package]
+name = "torrentsnail"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+byteorder = "1.4.3"
+serde = { version = "1.0.152", features = ["derive"] }
+serde_json = "1.0.91"
+tokio = { version = "1.25.0", features = ["full", "tracing"] }
+tokio-util = "0.7.4"
+tracing = "0.1.37"
+ring = "0.16.20"
+bit-vec = "0.6.3"
+chrono = { version = "0.4.23", features = ["serde"] }
+rand = "0.8.5"
+serde_bytes = "0.11.8"
+hex = "0.4.3"
+reqwest = { version = "0.11.14", features = ["json", "cookies", "blocking", "gzip", "deflate", "multipart"] }
+url = "2.3.1"
+thiserror = "1.0.38"
+uluru = "3.0.0"
+bytes = "1.4.0"
+axum = { version = "0.6.12", features = ["ws", "headers", "multipart"] }
+tower-http = { version = "0.4.0", features=["trace", "request-id"] }
+futures = "0.3"
+tower = "0.4.13"
+base64 = "0.21.0"
+dashmap = "5.4.0"
+num = "0.4.0"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+dotenvy	 = "0.15.7"
+toml = "0.7.4"
+clap = { version = "4.3.3", features = ["derive", "env"] }
+home = "0.5.5"
+bencode = { path = "../bencode" }
+
+[dev-dependencies]
+glob = "0.3.1"
+
+[lib]
+name = "torrentsnail"
+path = "src/lib.rs"
