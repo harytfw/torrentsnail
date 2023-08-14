@@ -1,19 +1,19 @@
 use crate::app::middleware;
 use crate::app::Application;
-use crate::error::Error;
-use crate::torrent::HashId;
+use anyhow::{anyhow, Error};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::routing::post;
 use axum::Json;
 use axum::{extract::Path, extract::State, Router};
-use tracing::debug;
+use snail::torrent::HashId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tower_http::request_id::{
     MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
+use tracing::debug;
 use tracing::error;
 
 use crate::app::models::CreateTorrentSessionRequest;
@@ -125,12 +125,8 @@ async fn create_torrent_session(
         }
     };
     match builder.build().await {
-        Ok(session) => {
-            Json(TorrentSessionInfo::from_session(&session)).into_response()
-        }
-        Err(e) => {
-            Json(ErrorResponse::from(e)).into_response()
-        }
+        Ok(session) => Json(TorrentSessionInfo::from_session(&session)).into_response(),
+        Err(e) => Json(ErrorResponse::from(e)).into_response(),
     }
 }
 
@@ -161,9 +157,7 @@ async fn list_session_peers(
         .unwrap_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse::from(Error::Generic(
-                    "session not found".to_string(),
-                ))),
+                Json(ErrorResponse::from_str("session not found")),
             )
                 .into_response()
         })
@@ -179,9 +173,7 @@ async fn add_session_peer(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse::from(Error::Generic(
-                    "session not found".to_string(),
-                ))),
+                Json(ErrorResponse::from_str("session not found")),
             )
                 .into_response();
         }

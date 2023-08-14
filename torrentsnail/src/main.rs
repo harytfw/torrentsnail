@@ -1,9 +1,9 @@
 use clap::Parser;
+use snail::config::Config;
 use tokio::signal;
-use torrentsnail::app::Application;
-use torrentsnail::config::Config;
-use torrentsnail::Result;
-
+mod app;
+use anyhow::Result;
+use app::Application;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]

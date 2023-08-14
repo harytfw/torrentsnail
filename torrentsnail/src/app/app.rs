@@ -1,12 +1,11 @@
-use crate::config::Config;
-use crate::message::BTHandshake;
-use crate::session::{TorrentSession, TorrentSessionBuilder};
-use crate::{dht::DHT, lsd::LSD, torrent::HashId};
-use crate::{Error, Result};
+use anyhow::{Error, Result};
+use snail::config::Config;
+use snail::message::BTHandshake;
+use snail::session::{TorrentSession, TorrentSessionBuilder};
+use snail::{dht::DHT, lsd::LSD, torrent::HashId};
 
 use crate::app::handler::start_server;
 use dashmap::DashMap;
-use rand::random;
 
 use std::path::Path;
 use std::{fs, net::SocketAddr, sync::Arc};
@@ -47,7 +46,7 @@ impl Application {
         );
 
         debug!("setup my_id");
-        let my_id = Arc::new(crate::utils::load_id(&config.id_path())?);
+        let my_id = Arc::new(snail::utils::load_id(&config.id_path())?);
 
         debug!(?listen_addr, "setup udp socket");
         let udp = Arc::new(UdpSocket::bind(listen_addr.as_ref()).await?);
@@ -190,13 +189,8 @@ impl Application {
         self.sessions.get(info_hash).map(|s| s.clone())
     }
 
-    pub(crate) async fn attach_session(self: &Arc<Self>, session: TorrentSession) {
-        self.sessions.insert(*session.info_hash, session);
-    }
-
     pub fn builder(self: &Arc<Self>) -> TorrentSessionBuilder {
-        TorrentSessionBuilder::new()
-            .with_app(Arc::downgrade(self))
+        snail::session::TorrentSessionBuilder::new()
             .with_lsd(self.lsd.clone())
             .with_dht(self.dht.clone())
             .with_my_id(*self.my_id)

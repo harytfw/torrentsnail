@@ -1,4 +1,3 @@
-use crate::app::Application;
 use crate::config::Config;
 use crate::dht::DHT;
 use crate::lsd::LSD;
@@ -24,7 +23,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, ToSocketAddrs};
@@ -42,7 +41,6 @@ pub struct TorrentSessionBuilder {
     torrent_path: Option<PathBuf>,
     torrent: Option<TorrentFile>,
     storage_dir: Option<PathBuf>,
-    app: Option<Weak<Application>>,
     check_files: bool,
     dht: Option<DHT>,
     lsd: Option<LSD>,
@@ -54,13 +52,6 @@ pub struct TorrentSessionBuilder {
 impl TorrentSessionBuilder {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn with_app(self, bt: Weak<Application>) -> Self {
-        Self {
-            app: Some(bt),
-            ..self
-        }
     }
 
     pub fn with_uri(self, uri: &str) -> Result<Self> {
@@ -169,8 +160,9 @@ impl TorrentSessionBuilder {
     }
 
     pub async fn build(mut self) -> Result<TorrentSession> {
-        let app_weak = self.app.unwrap();
-        let app = app_weak.upgrade().unwrap();
+        let my_id = self
+            .my_id
+            .ok_or_else(|| Error::Generic("no my_id".to_string()))?;
 
         let mut pm: StorageManager;
         let mut metadata_cache: StorageManager;
@@ -220,7 +212,7 @@ impl TorrentSessionBuilder {
             metadata_cache = StorageManager::empty();
         }
 
-        let handshake_template = Self::build_handshake(&app.my_id, &info_hash);
+        let handshake_template = Self::build_handshake(&my_id, &info_hash);
 
         let (peer_conn_req_tx, peer_addr_rx) = mpsc::channel(10);
         let (peer_piece_req_tx, peer_piece_req_rx) = mpsc::channel(50);
@@ -269,7 +261,6 @@ impl TorrentSessionBuilder {
             });
         }
         info!(?info_hash, "new torrent session");
-        app.attach_session(ts.clone()).await;
         Ok(ts)
     }
 }

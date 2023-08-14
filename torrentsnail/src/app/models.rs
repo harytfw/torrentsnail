@@ -1,13 +1,11 @@
-use crate::{
+use anyhow::{Error, Result};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use snail::{
     session::{Peer, TorrentSession, TorrentSessionStatus},
     torrent::HashId,
-    Error, Result,
 };
-
-use chrono::{Utc};
-use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Ping {
@@ -109,8 +107,7 @@ impl AddSessionPeerRequest {
             let port = parts.next().unwrap();
             peers.push(SocketAddr::new(
                 ip.parse()?,
-                port.parse::<u16>()
-                    .map_err(|e| Error::Generic(e.to_string()))?,
+                port.parse::<u16>().map_err(|e| e)?,
             ));
         }
         Ok(peers)
@@ -134,8 +131,22 @@ pub struct ErrorResponse {
     error: ErrorResponseItem,
 }
 
-impl From<Error> for ErrorResponse {
-    fn from(e: Error) -> Self {
+impl ErrorResponse {
+    pub fn from_str(s: &str) -> Self {
+        Self {
+            error: ErrorResponseItem {
+                code: "TODO".to_string(),
+                message: s.to_string(),
+            },
+        }
+    }
+}
+
+impl<T> From<T> for ErrorResponse
+where
+    T: std::error::Error + Send + Sync + 'static,
+{
+    fn from(e: T) -> Self {
         Self {
             error: ErrorResponseItem {
                 code: "TODO".to_string(),
