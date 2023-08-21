@@ -45,11 +45,11 @@ impl Application {
             .parse()?,
         );
 
-        debug!("setup my_id");
         let my_id = Arc::new(snail::utils::load_id(&config.id_path())?);
+        debug!(?my_id, "setup my_id");
 
-        debug!(?listen_addr, "setup udp socket");
         let udp = Arc::new(UdpSocket::bind(listen_addr.as_ref()).await?);
+        debug!(?listen_addr, "listen udp socket");
 
         debug!("setup dht");
         let dht = DHT::new(udp.clone(), &my_id, &config.routing_table_path());
@@ -161,7 +161,8 @@ impl Application {
             return;
         }
 
-        debug!("torrent session not found");
+        debug!(info_hash=?handshake.info_hash, "torrent session not found, shutdown tcp connection");
+
         if let Err(e) = tcp.shutdown().await {
             error!(err = ?e);
         }
@@ -177,7 +178,7 @@ impl Application {
             self.sessions.clear();
             Ok(())
         }
-        .instrument(debug_span!("shutdown"))
+        .instrument(debug_span!("shutdown application"))
         .await
     }
 
@@ -185,17 +186,23 @@ impl Application {
         self.sessions.clone()
     }
 
-    pub fn get_session(self: &Arc<Self>, info_hash: &HashId) -> Option<TorrentSession> {
+    pub fn get_session_by_info_hash(self: &Arc<Self>, info_hash: &HashId) -> Option<TorrentSession> {
         self.sessions.get(info_hash).map(|s| s.clone())
     }
 
-    pub fn builder(self: &Arc<Self>) -> TorrentSessionBuilder {
+    pub fn acquire_builder(self: &Arc<Self>) -> TorrentSessionBuilder {
         snail::session::TorrentSessionBuilder::new()
             .with_lsd(self.lsd.clone())
             .with_dht(self.dht.clone())
             .with_my_id(*self.my_id)
             .with_listen_addr(*self.listen_addr)
             .with_config(self.config.clone())
+    }
+
+    pub async fn consume_builder(self: &Arc<Self>, builder: TorrentSessionBuilder) -> Result<()> {
+        let session = builder.build().await?;
+        self.sessions.insert(*session.info_hash.clone(), session);
+        Ok(())
     }
 
     pub async fn wait_until_shutdown(self: &Arc<Self>) {

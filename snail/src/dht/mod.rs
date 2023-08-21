@@ -688,7 +688,9 @@ impl DHTInner {
             }
         }
 
-        debug!(pending = ?pending_search, "pending search peer");
+        if !pending_search.is_empty() {
+            debug!(pending = ?pending_search, "pending search peer");
+        }
 
         let storage = &mut self.peer_storage;
         for pending in pending_search {
@@ -705,7 +707,10 @@ impl DHTInner {
     async fn load_routing_table(&mut self) -> Result<()> {
         use tokio::io::AsyncReadExt;
 
+        debug!(?self.routing_table_path, "loading routing table");
+
         if !self.routing_table_path.exists() {
+            debug!(?self.routing_table_path, "routing table not exists, skip");
             return Ok(());
         }
 
@@ -732,6 +737,8 @@ impl DHTInner {
                 other => todo!("{:?}", other),
             }
         }
+
+        debug!("loaded {} nodes", nodes.len());
 
         for node in nodes {
             self.new_node(node.addr(), node.id()).await?;

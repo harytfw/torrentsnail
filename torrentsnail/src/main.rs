@@ -4,6 +4,7 @@ use tokio::signal;
 mod app;
 use anyhow::Result;
 use app::Application;
+use tracing::log::info;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -16,6 +17,13 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_file(true)
+        .with_line_number(true)
+        .init();
+    
     let args = Args::parse();
 
     let cfg = if let Some(config_path) = args.config {
@@ -24,16 +32,13 @@ async fn main() -> Result<()> {
         Config::default()
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_file(true)
-        .with_line_number(true)
-        .init();
 
     let app = Application::from_config(cfg).await.unwrap();
 
+    info!("wait interrupt");
     signal::ctrl_c().await.expect("failed to listen for event");
 
+    info!("start shutdown app");
     app.shutdown().await.unwrap();
 
     Ok(())

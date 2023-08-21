@@ -85,6 +85,11 @@ impl TorrentSessionBuilder {
         }
     }
 
+
+    pub fn info_hash(&self) -> Option<HashId> {
+        self.info_hash
+    }
+
     pub fn with_torrent_path(self, path: impl AsRef<Path>) -> Self {
         Self {
             torrent_path: Some(path.as_ref().to_path_buf()),

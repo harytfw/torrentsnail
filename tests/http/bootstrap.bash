@@ -1,0 +1,1 @@
+hurl --variables-file ./hurl.env ./query-sessions.hurl

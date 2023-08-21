@@ -118,15 +118,30 @@ async fn create_torrent_session(
     State(app): State<Arc<Application>>,
     req: Json<CreateTorrentSessionRequest>,
 ) -> Response {
-    let builder = match app.builder().with_uri(&req.uri) {
+    let builder = match app.acquire_builder().with_uri(&req.uri) {
         Ok(builder) => builder,
         Err(e) => {
             return Json(ErrorResponse::from(e)).into_response();
         }
     };
-    match builder.build().await {
-        Ok(session) => Json(TorrentSessionInfo::from_session(&session)).into_response(),
-        Err(e) => Json(ErrorResponse::from(e)).into_response(),
+
+    let info_hash = match builder.info_hash() {
+        Some(info_hash) => info_hash,
+        None => {
+            return Json(ErrorResponse::from_str("no info hash")).into_response();
+        }
+    };
+
+    match app.consume_builder(builder).await {
+        Ok(_) => {}
+        Err(e) => {
+            return Json(ErrorResponse::from_str(&e.to_string())).into_response();
+        }
+    };
+
+    match app.get_session_by_info_hash(&info_hash) {
+        Some(session) => Json(TorrentSessionInfo::from_session(&session)).into_response(),
+        None => Json(ErrorResponse::from_str("session not found")).into_response(),
     }
 }
 
@@ -142,7 +157,7 @@ async fn list_session_peers(
     Path(info_hash): Path<String>,
 ) -> Response {
     let id = HashId::from_hex(info_hash).unwrap();
-    app.get_session(&id)
+    app.get_session_by_info_hash(&id)
         .map(|session| {
             Json(CursorPagination::new(
                 session
@@ -168,7 +183,7 @@ async fn add_session_peer(
     req: Json<AddSessionPeerRequest>,
 ) -> Response {
     let id = HashId::from_hex(&info_hash).unwrap();
-    let session = match app.get_session(&id) {
+    let session = match app.get_session_by_info_hash(&id) {
         Some(session) => session,
         None => {
             return (
