@@ -17,10 +17,11 @@ use tracing::debug;
 use tracing::error;
 
 use crate::app::models::CreateTorrentSessionRequest;
-use crate::app::models::{CursorPagination, ErrorResponse, Pong, TorrentSessionInfo};
+use crate::app::models::{CursorPagination, ErrorResponse, Pong, TorrentSessionModel};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 
 use super::models::AddSessionPeerRequest;
+use super::models::OkResponse;
 use super::models::PeerInfo;
 use super::models::UpdateTorrentSessionRequest;
 
@@ -60,7 +61,11 @@ pub async fn start_server(app: Arc<Application>) {
                         .patch(update_torrent_session),
                 )
                 .route(
-                    "/torrents/sessions/:info_hash/peers",
+                    "/torrent/sessions/:info_hash",
+                    get(get_session),
+                )
+                .route(
+                    "/torrent/sessions/:info_hash/peers",
                     get(list_session_peers).post(add_session_peer),
                 )
                 .layer(SetRequestIdLayer::x_request_id(MyMakeRequestId::default()))
@@ -107,9 +112,9 @@ async fn handler_ping(State(_app): State<Arc<Application>>) -> Json<Pong> {
 
 async fn list_torrent_sessions(State(app): State<Arc<Application>>) -> Response {
     let session = app.sessions();
-    let session_info_list: Vec<TorrentSessionInfo> = session
+    let session_info_list: Vec<TorrentSessionModel> = session
         .iter()
-        .map(|s| TorrentSessionInfo::from_session(&s))
+        .map(|s| TorrentSessionModel::from_session(&s))
         .collect();
     Json(CursorPagination::new(session_info_list, None)).into_response()
 }
@@ -118,31 +123,61 @@ async fn create_torrent_session(
     State(app): State<Arc<Application>>,
     req: Json<CreateTorrentSessionRequest>,
 ) -> Response {
-    let builder = match app.acquire_builder().with_uri(&req.uri) {
-        Ok(builder) => builder,
-        Err(e) => {
-            return Json(ErrorResponse::from(e)).into_response();
-        }
-    };
+    let mut info_hash_vec:Vec<String> = vec![];
 
-    let info_hash = match builder.info_hash() {
-        Some(info_hash) => info_hash,
-        None => {
-            return Json(ErrorResponse::from_str("no info hash")).into_response();
-        }
-    };
+    for uri in req.uri.iter() {
+        let builder = match app.acquire_builder().with_uri(&uri) {
+            Ok(builder) => builder,
+            Err(e) => {
+                return Json(ErrorResponse::from(e)).into_response();
+            }
+        };
 
-    match app.consume_builder(builder).await {
-        Ok(_) => {}
-        Err(e) => {
-            return Json(ErrorResponse::from_str(&e.to_string())).into_response();
-        }
-    };
+        match builder.info_hash() {
+            Some(info_hash) => {
+                info_hash_vec.push(info_hash.hex());
+            }
+            None => {
+                error!(uri=?uri, "no info hash");
+            }
+        };
 
-    match app.get_session_by_info_hash(&info_hash) {
-        Some(session) => Json(TorrentSessionInfo::from_session(&session)).into_response(),
-        None => Json(ErrorResponse::from_str("session not found")).into_response(),
+        let app = app.clone();
+        tokio::spawn(async move {
+            match app.consume_builder(builder).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!(
+                        err = ?e,
+                        "consume builder failed"
+                    )
+                }
+            };
+        });
     }
+
+    Json(OkResponse::new(info_hash_vec)).into_response()
+}
+
+async fn get_session(
+    State(app): State<Arc<Application>>,
+    Path(info_hash): Path<String>,
+) -> Response {
+    debug!(info_hash=?info_hash, "get session");
+
+    let id = HashId::from_hex(info_hash).unwrap();
+
+    let session = match app.get_session_by_info_hash(&id) {
+        Some(session) => session,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::from_str("session not found")),
+            )
+                .into_response();
+        }
+    };
+    Json(OkResponse::new(TorrentSessionModel::from_session(&session))).into_response()
 }
 
 async fn update_torrent_session(

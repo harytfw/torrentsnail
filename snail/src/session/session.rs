@@ -1056,4 +1056,8 @@ impl TorrentSession {
     pub fn peers(&self) -> Arc<dashmap::DashMap<HashId, Peer>> {
         Arc::clone(&self.peers)
     }
+
+    pub fn persistent(&self, directory: &Path) -> Result<()> {
+        Ok(())
+    }
 }

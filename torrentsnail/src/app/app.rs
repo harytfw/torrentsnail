@@ -187,6 +187,7 @@ impl Application {
     }
 
     pub fn get_session_by_info_hash(self: &Arc<Self>, info_hash: &HashId) -> Option<TorrentSession> {
+        debug!(?info_hash, len = ?self.sessions.len(), "get session by info hash");
         self.sessions.get(info_hash).map(|s| s.clone())
     }
 

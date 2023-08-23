@@ -5,7 +5,7 @@ use snail::{
     session::{Peer, TorrentSession, TorrentSessionStatus},
     torrent::HashId,
 };
-use std::net::SocketAddr;
+use std::{fmt::Debug, net::SocketAddr};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Ping {
@@ -55,7 +55,7 @@ pub struct TrackerInfo {
 }
 
 #[derive(Serialize, Debug)]
-pub struct TorrentSessionInfo {
+pub struct TorrentSessionModel {
     name: String,
     info_hash: HexHashId,
     torrent: (),
@@ -63,7 +63,7 @@ pub struct TorrentSessionInfo {
     status: TorrentSessionStatus,
 }
 
-impl TorrentSessionInfo {
+impl TorrentSessionModel {
     pub fn from_session(session: &TorrentSession) -> Self {
         Self {
             name: session.name.clone(),
@@ -84,7 +84,7 @@ impl TorrentSessionInfo {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct CreateTorrentSessionRequest {
-    pub uri: String,
+    pub uri: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -160,4 +160,19 @@ where
 pub struct ErrorResponseItem {
     code: String,
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OkResponse<T>
+where
+    T: Debug + Serialize,
+{
+    value: T,
+}
+
+
+impl<T> OkResponse<T> where T: Debug + Serialize{
+    pub fn new(value: T) -> Self {
+        Self { value }
+    }
 }

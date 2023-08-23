@@ -1,11 +1,15 @@
 use crate::torrent::HashId;
+use crate::Result;
+use crate::{session::TorrentSession, torrent::TorrentFile};
 use rand::Rng;
 use std::{
     cmp,
     collections::{hash_map::DefaultHasher, BTreeMap},
     hash::{Hash, Hasher},
+    path::Path,
     time::SystemTime,
 };
+use tracing::{error, warn};
 
 pub fn shuffle_slice<T>(mut slice: &mut [T]) {
     let mut rng = rand::thread_rng();
@@ -114,4 +118,46 @@ mod tests {
         assert_eq!(calc_speed(&BTreeMap::new()), 0);
         assert_eq!(calc_speed(&BTreeMap::from_iter([(1, 100)])), 100);
     }
+}
+
+fn persistent_torrent_file(session: &TorrentSession, f: &Path) -> Result<()> {
+    if f.exists() {
+        let metadata = f.metadata()?;
+        if metadata.len() > 0 {
+            return Ok(());
+        }
+        warn!(info_hash=?session.info_hash.hex() ,"torrent file is empty, overwrite");
+    }
+
+    let tf = session.torrent.blocking_read();
+
+
+    if tf.is_none() {
+        warn!("torrent file not found");
+        return Ok(());
+    }
+
+    let torrent = tf.as_ref().unwrap();
+
+    let origin_content = match torrent.get_origin_content() {
+        Some(content) => content,
+        None => return Ok(()),
+    };
+
+    let mut f = std::fs::File::create(f)?;
+    let buf = bencode::to_bytes(origin_content)?;
+    std::io::Write::write_all(&mut f, &buf)?;
+    Ok(())
+}
+
+fn persistent_state(session: &TorrentSession, f: &Path) -> Result<()> {
+    Ok(())
+}
+
+pub(crate) fn persistent_session(session: &TorrentSession, dir: &Path) -> Result<()> {
+    persistent_torrent_file(
+        &session,
+        &dir.with_file_name(format!("{}.torrent", session.info_hash.hex())),
+    )?;
+    Ok(())
 }
