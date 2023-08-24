@@ -1,7 +1,7 @@
 use crate::session::file::{FileFragment, FilePieceMap, FilePieceMapBuilder};
 use crate::session::piece::Piece;
 use crate::session::utils::calc_piece_num;
-use crate::torrent::{TorrentInfo};
+use crate::torrent::TorrentInfo;
 use crate::{Error, Result};
 use bit_vec::BitVec;
 use std::collections::{BTreeMap, HashSet};
@@ -9,11 +9,12 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error};
 
 #[derive(Debug, Default)]
-pub struct StorageManager {
+struct Inner {
     name: String,
     cache: BTreeMap<usize, Piece>,
     first_piece_len: usize,
@@ -26,8 +27,8 @@ pub struct StorageManager {
     total_size: usize,
 }
 
-impl StorageManager {
-    pub fn from_torrent_info(data_dir: impl AsRef<Path>, info: &TorrentInfo) -> Result<Self> {
+impl Inner {
+    pub async fn from_torrent_info(data_dir: impl AsRef<Path>, info: &TorrentInfo) -> Result<Self> {
         let mut builder = FilePieceMapBuilder::new();
 
         builder
@@ -65,11 +66,11 @@ impl StorageManager {
             total_size: info.total_length(),
             checked_bits: BitVec::from_elem(piece_num, false),
         };
-        cache.load_bits()?;
+        cache.load_bits().await?;
         Ok(cache)
     }
 
-    pub fn from_single_file(
+    pub async fn from_single_file(
         path: impl AsRef<Path>,
         total_size: usize,
         piece_len: usize,
@@ -102,7 +103,7 @@ impl StorageManager {
             checked_bits_path: path.as_ref().join(".snail_checked_bits"),
             total_size,
         };
-        cache.load_bits()?;
+        cache.load_bits().await?;
         Ok(cache)
     }
 
@@ -110,16 +111,16 @@ impl StorageManager {
         Default::default()
     }
 
-    pub async fn fetch(&mut self, index: usize) -> Result<&Piece> {
+    pub async fn fetch(&mut self, index: usize) -> Result<Piece> {
         if self.cache.contains_key(&index) {
-            return Ok(self.cache.get_mut(&index).unwrap());
+            return Ok(self.cache.get_mut(&index).cloned().unwrap());
         }
 
         if index >= self.piece_num {
             return Err(Error::PieceNotFound(index));
         }
 
-        let piece_len = self.piece_len(index);
+        let piece_len = self.piece_len(index).await;
         let mut pieces = [Piece::new(index, piece_len)];
         let mut handles = vec![];
 
@@ -151,7 +152,7 @@ impl StorageManager {
 
         // self.expire();
         self.cache.insert(index, piece);
-        Ok(self.cache.get_mut(&index).unwrap())
+        Ok(self.cache.get_mut(&index).unwrap().clone())
     }
 
     pub async fn write(&mut self, piece: Piece) -> Result<()> {
@@ -163,23 +164,23 @@ impl StorageManager {
     }
 
     pub async fn read(&mut self, index: usize) -> Result<Piece> {
-        self.fetch(index).await.cloned()
+        self.fetch(index).await
     }
 
-    pub fn clear_all_checked_bits(&mut self) -> Result<()> {
+    pub async fn clear_all_checked_bits(&mut self) -> Result<()> {
         self.checked_bits.clear();
         Ok(())
     }
 
-    pub fn all_checked(&mut self) -> bool {
+    pub async fn all_checked(&self) -> bool {
         self.checked_bits.all()
     }
 
-    pub fn is_checked(&self, index: usize) -> bool {
+    pub async fn is_checked(&self, index: usize) -> bool {
         self.checked_bits[index]
     }
 
-    pub fn assume_checked(&mut self) {
+    pub async fn assume_checked(&mut self) {
         for i in 0..self.piece_num {
             self.checked_bits.set(i, true);
         }
@@ -249,12 +250,12 @@ impl StorageManager {
             handle.await.unwrap()?;
         }
 
-        self.save_bits()?;
+        self.save_bits().await?;
         self.cache.clear();
         Ok(())
     }
 
-    pub fn piece_len(&self, index: usize) -> usize {
+    pub async fn piece_len(&self, index: usize) -> usize {
         if index >= self.piece_num {
             panic!("index out of bound");
         }
@@ -265,34 +266,37 @@ impl StorageManager {
         }
     }
 
-    pub fn piece_num(&self) -> usize {
+    pub async fn piece_num(&self) -> usize {
         self.piece_num
     }
 
-    pub fn total_size(&self) -> usize {
+    pub async fn total_size(&self) -> usize {
         self.total_size
     }
 
-    pub fn cache_size(&self) -> usize {
+    pub async fn cache_size(&self) -> usize {
         self.cache_size
     }
 
-    pub fn update_cache_size(&mut self, size: usize) -> usize {
+    pub async fn update_cache_size(&mut self, size: usize) -> usize {
         let old = self.cache_size;
         self.cache_size = size;
         old
     }
 
-    pub fn save_bits(&mut self) -> Result<()> {
+    pub async fn save_bits(&mut self) -> Result<()> {
         debug!(name=?self.name, "save bits");
         fs::write(&self.checked_bits_path, self.checked_bits.to_bytes())?;
         Ok(())
     }
 
-    pub fn load_bits(&mut self) -> Result<()> {
+    pub async fn load_bits(&mut self) -> Result<()> {
         debug!(name=?self.name, "load bits");
 
-        if let Some(bits) = self.read_bit_vec(&self.checked_bits_path, self.checked_bits.len()) {
+        if let Some(bits) = self
+            .read_bit_vec(&self.checked_bits_path, self.checked_bits.len())
+            .await
+        {
             self.checked_bits = bits;
         }
 
@@ -300,7 +304,7 @@ impl StorageManager {
         Ok(())
     }
 
-    fn read_bit_vec(&self, path: &Path, bit_len: usize) -> Option<BitVec> {
+    pub async fn read_bit_vec(&self, path: &Path, bit_len: usize) -> Option<BitVec> {
         let data = match fs::read(path) {
             Ok(data) => Ok(data),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(vec![]),
@@ -324,16 +328,16 @@ impl StorageManager {
         }
     }
 
-    pub fn checked_bits(&self) -> &BitVec {
+    pub async fn checked_bits(&self) -> &BitVec {
         &self.checked_bits
     }
 
-    pub fn paths(&self) -> Vec<&Path> {
-        self.maps.iter().map(|m| m.path()).collect()
+    pub async fn paths(&self) -> Vec<PathBuf> {
+        self.maps.iter().map(|m| m.path().to_path_buf()).collect()
     }
 
-    pub fn maps(&self) -> &[Arc<FilePieceMap>] {
-        &self.maps
+    pub async fn maps(&self) -> Vec<Arc<FilePieceMap>> {
+        self.maps.clone()
     }
 }
 
@@ -360,12 +364,12 @@ pub mod tests {
         PathBuf::from("/tmp/snail/ancient-poetry/ancient-poetry.torrent")
     }
 
-    pub fn setup_storage_manager() -> Result<(TorrentFile, StorageManager)> {
+    pub async fn setup_storage_manager() -> Result<(TorrentFile, StorageManager)> {
         let torrent_path = setup_test_torrent();
 
         let torrent = TorrentFile::from_path(&torrent_path)?;
 
-        let pm = StorageManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info)?;
+        let pm = StorageManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info).await?;
         Ok((torrent, pm))
     }
 
@@ -373,27 +377,27 @@ pub mod tests {
     async fn empty_piece_manager() -> Result<()> {
         let mut pm = StorageManager::empty();
 
-        assert!(pm.all_checked());
+        assert!(pm.all_checked().await);
         assert!(pm.check(0, &[0]).await.is_err());
         assert!(pm.fetch(0).await.is_err());
-        assert_eq!(pm.piece_num(), 0);
+        assert_eq!(pm.piece_num().await, 0);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn piece_manager_single_file() -> Result<()> {
-        let mut pm = StorageManager::from_single_file("/tmp/snail.torrent", 51413, 16384)?;
-        for i in 0..pm.piece_num() {
+        let mut pm = StorageManager::from_single_file("/tmp/snail.torrent", 51413, 16384).await?;
+        for i in 0..pm.piece_num().await {
             let p = pm.fetch(i).await?;
             assert!(p.buf().iter().all(|byte| *byte == 0));
         }
         Ok(())
     }
 
-    #[test]
-    fn test_setup_storage_manager() -> Result<()> {
-        setup_storage_manager()?;
+    #[tokio::test]
+    async fn test_setup_storage_manager() -> Result<()> {
+        setup_storage_manager().await?;
         Ok(())
     }
 
@@ -406,20 +410,21 @@ pub mod tests {
         let sha1_fn = |index: usize| torrent.info.get_piece_sha1(index);
 
         let mut pm =
-            StorageManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info)?;
+            StorageManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info)
+                .await?;
 
         // read and write same piece
-        for i in 0..pm.piece_num() {
+        for i in 0..pm.piece_num().await {
             let p = pm.read(i).await?;
             pm.write(p).await?;
         }
 
-        for i in 0..pm.piece_num() {
+        for i in 0..pm.piece_num().await {
             assert!(pm.check(i, sha1_fn(i)).await?);
         }
 
-        for i in 0..pm.piece_num() {
-            assert!(pm.is_checked(i));
+        for i in 0..pm.piece_num().await {
+            assert!(pm.is_checked(i).await);
         }
 
         {
@@ -435,6 +440,7 @@ pub mod tests {
         {
             let paths = pm
                 .paths()
+                .await
                 .iter()
                 .map(|p| p.to_path_buf())
                 .collect::<Vec<PathBuf>>();
@@ -470,8 +476,8 @@ pub mod tests {
         }
 
         {
-            let origin_size = pm.maps()[0].size() as u64;
-            let path = pm.maps()[0].path().to_path_buf();
+            let origin_size = pm.maps().await[0].size() as u64;
+            let path = pm.maps().await[0].path().to_path_buf();
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .append(true)
@@ -487,5 +493,150 @@ pub mod tests {
         }
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageManager {
+    inner: Arc<RwLock<Inner>>,
+}
+
+impl StorageManager {
+    pub async fn from_torrent_info(data_dir: impl AsRef<Path>, info: &TorrentInfo) -> Result<Self> {
+        let inner = Inner::from_torrent_info(data_dir, info).await?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
+    pub async fn from_single_file(
+        path: impl AsRef<Path>,
+        total_size: usize,
+        piece_len: usize,
+    ) -> Result<Self> {
+        let inner = Inner::from_single_file(path, total_size, piece_len).await?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Inner::empty())),
+        }
+    }
+
+    pub async fn fetch(&self, index: usize) -> Result<Piece> {
+        let mut inner = self.inner.write().await;
+        inner.fetch(index).await
+    }
+
+    pub async fn write(&self, piece: Piece) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.write(piece).await
+    }
+
+    pub async fn read(&self, index: usize) -> Result<Piece> {
+        let mut inner = self.inner.write().await;
+        inner.read(index).await
+    }
+
+    pub async fn clear_all_checked_bits(&self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.clear_all_checked_bits().await
+    }
+
+    pub async fn all_checked(&self) -> bool {
+        let inner = self.inner.write().await;
+        inner.all_checked().await
+    }
+
+    pub async fn is_checked(&self, index: usize) -> bool {
+        let inner = self.inner.write().await;
+        inner.is_checked(index).await
+    }
+
+    pub async fn assume_checked(&self) {
+        let mut inner = self.inner.write().await;
+        inner.assume_checked().await
+    }
+
+    pub async fn fix_file_size(&self, path: impl AsRef<Path>) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.fix_file_size(path).await
+    }
+
+    pub async fn check(&self, index: usize, checksum: &[u8]) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        inner.check(index, checksum).await
+    }
+
+    pub async fn check_file<'a>(
+        &mut self,
+        path: impl AsRef<Path>,
+        checksum_fn: impl Fn(usize) -> &'a [u8],
+    ) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        inner.check_file(path, checksum_fn).await
+    }
+
+    pub async fn flush(&self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.flush().await
+    }
+
+    pub async fn piece_len(&self, index: usize) -> usize {
+        let inner = self.inner.write().await;
+        inner.piece_len(index).await
+    }
+
+    pub async fn piece_num(&self) -> usize {
+        let inner = self.inner.read().await;
+        inner.piece_num().await
+    }
+
+    pub async fn total_size(&self) -> usize {
+        let inner = self.inner.write().await;
+        inner.total_size().await
+    }
+
+    pub async fn cache_size(&self) -> usize {
+        let inner = self.inner.write().await;
+        inner.cache_size().await
+    }
+
+    pub async fn update_cache_size(&self, size: usize) -> usize {
+        let mut inner = self.inner.write().await;
+        inner.update_cache_size(size).await
+    }
+
+    pub async fn save_bits(&mut self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.save_bits().await
+    }
+
+    pub async fn load_bits(&mut self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.load_bits().await
+    }
+
+    async fn read_bit_vec(&self, path: &Path, bit_len: usize) -> Option<BitVec> {
+        let inner = self.inner.write().await;
+        inner.read_bit_vec(path, bit_len).await
+    }
+
+    pub async fn checked_bits(&self) -> BitVec {
+        let inner = self.inner.write().await;
+        inner.checked_bits().await.clone()
+    }
+
+    pub async fn paths(&self) -> Vec<PathBuf> {
+        let inner = self.inner.write().await;
+        inner.paths().await
+    }
+
+    pub async fn maps(&self) -> Vec<Arc<FilePieceMap>> {
+        let inner = self.inner.read().await;
+        inner.maps().await
     }
 }

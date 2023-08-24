@@ -1,22 +1,10 @@
-
-
-
-
-
-
-
 use std::fmt::Debug;
-
-
-
-
-use std::{cmp};
-
-
+use std::cmp;
+use bytes::BytesMut;
 
 #[derive(Clone)]
 pub struct Piece {
-    buf: Vec<u8>,
+    buf: BytesMut,
     index: usize,
 }
 
@@ -29,7 +17,7 @@ impl Debug for Piece {
 impl Piece {
     pub fn new(index: usize, piece_len: usize) -> Self {
         Self {
-            buf: vec![0; piece_len],
+            buf: BytesMut::zeroed(piece_len),
             index,
         }
     }
@@ -37,7 +25,7 @@ impl Piece {
     pub fn from_buf(index: usize, buf: &[u8]) -> Self {
         Self {
             index,
-            buf: buf.to_vec(),
+            buf: BytesMut::from_iter(buf),
         }
     }
 

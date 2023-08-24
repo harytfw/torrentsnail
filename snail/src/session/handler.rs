@@ -40,7 +40,7 @@ impl TorrentSession {
                 let index = *index as usize;
                 let mut state = peer.state.write().await;
                 if state.owned_pieces.is_empty() {
-                    let num = self.sm.read().await.piece_num();
+                    let num = self.sm.piece_num().await;
                     state.owned_pieces = bit_vec::BitVec::from_elem(num, false)
                 }
                 if index < state.owned_pieces.len() {
@@ -122,9 +122,9 @@ impl TorrentSession {
                 let msg: UTMetadataMessage = {
                     let index = *index;
                     let mut metadata_pm = self.metadata_sm.write().await;
-                    let total_size = metadata_pm.total_size();
+                    let total_size = metadata_pm.total_size().await;
 
-                    if metadata_pm.is_checked(index) {
+                    if metadata_pm.is_checked(index).await {
                         let piece = metadata_pm.read(index).await?;
                         let piece_data = UTMetadataPieceData {
                             piece: index,

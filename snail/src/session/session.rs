@@ -196,17 +196,17 @@ impl TorrentSessionBuilder {
 
         if let Some(torrent) = torrent.as_ref() {
             info_hash = torrent.info_hash().unwrap();
-            pm = StorageManager::from_torrent_info(&storage_dir, &torrent.info)?;
+            pm = StorageManager::from_torrent_info(&storage_dir, &torrent.info).await?;
             let metadata_buf = bencode::to_bytes(torrent.get_origin_info().unwrap())?;
             metadata_cache = StorageManager::from_single_file(
                 &torrent_path,
                 metadata_buf.len(),
                 METADATA_PIECE_SIZE,
-            )?;
+            ).await?;
             metadata_cache.assume_checked();
 
             if self.check_files {
-                let paths: Vec<PathBuf> = pm.paths().iter().map(|p| p.to_path_buf()).collect();
+                let paths: Vec<PathBuf> = pm.paths().await.iter().map(|p| p.to_path_buf()).collect();
                 for path in paths {
                     let pass = pm
                         .check_file(&path, |i| torrent.info.get_piece_sha1(i))
@@ -239,12 +239,12 @@ impl TorrentSessionBuilder {
             tracker,
             peers: Arc::new(dashmap::DashMap::new()),
             info_hash: Arc::new(info_hash),
-            metadata_sm: Arc::new(RwLock::new(metadata_cache)),
+            metadata_sm: metadata_cache,
             handshake_template: Arc::new(handshake_template),
             torrent: Arc::new(RwLock::new(torrent)),
             peer_conn_req_tx,
             peer_piece_req_tx,
-            sm: Arc::new(RwLock::new(pm)),
+            sm: pm,
             piece_activity_man: Arc::new(RwLock::new(piece_log_man)),
             metadata_piece_activity_man: Arc::new(RwLock::new(metadata_log_man)),
             long_term_tasks: Default::default(),
@@ -355,8 +355,8 @@ pub struct TorrentSession {
     pub(crate) handshake_template: Arc<BTHandshake>,
     long_term_tasks: Arc<RwLock<JoinSet<()>>>,
     short_term_tasks: Arc<RwLock<JoinSet<()>>>,
-    pub(crate) sm: Arc<RwLock<StorageManager>>,
-    pub(crate) metadata_sm: Arc<RwLock<StorageManager>>,
+    pub(crate) sm: StorageManager,
+    pub(crate) metadata_sm: StorageManager,
     pub(crate) piece_activity_man: Arc<RwLock<PieceActivityManager>>,
     pub(crate) metadata_piece_activity_man: Arc<RwLock<PieceActivityManager>>,
 
@@ -480,9 +480,8 @@ impl TorrentSession {
             return Err(Error::Generic("duplicate peer".into()));
         }
         {
-            let pm = self.sm.read().await;
-            if !pm.checked_bits().is_empty() {
-                peer.send_message_now(BTMessage::BitField(pm.checked_bits().to_bytes()))
+            if !self.sm.checked_bits().await.is_empty() {
+                peer.send_message_now(BTMessage::BitField(self.sm.checked_bits().await.to_bytes()))
                     .await?;
             }
         }
@@ -642,15 +641,14 @@ impl TorrentSession {
         };
 
         if let Some(piece) = complete_piece {
-            let mut sm = self.sm.write().await;
-            sm.write(piece).await?;
-            let checked = sm.check(index, &sha1).await?;
-            all_checked = sm.all_checked();
+            self.sm.write(piece).await?;
+            let checked = self.sm.check(index, &sha1).await?;
+            all_checked = self.sm.all_checked().await;
             if checked {
                 peer.send_message_now(BTMessage::Have(index as u32)).await?;
             }
             if all_checked {
-                sm.flush().await?;
+                self.sm.flush().await?;
             }
         }
         if all_checked {
@@ -666,9 +664,7 @@ impl TorrentSession {
             .get(&peer_id)
             .ok_or(Error::Generic("peer not found".to_owned()))?;
 
-        let mut metadata_pm = self.metadata_sm.write().await;
-
-        if metadata_pm.total_size() == 0 {
+        if self.metadata_sm.total_size().await == 0 {
             if let Some(total_len) = peer
                 .handshake
                 .ext_handshake
@@ -676,21 +672,21 @@ impl TorrentSession {
                 .and_then(|ext| ext.get_metadata_size())
             {
                 debug!(?total_len, "create torrent metadata piece manager");
-                *metadata_pm = StorageManager::from_single_file(
+                self.metadata_sm = StorageManager::from_single_file(
                     "/tmp/snail_tmp.torrent",
                     total_len,
                     METADATA_PIECE_SIZE,
-                )?;
+                ).await?;
             }
         }
 
-        if metadata_pm.all_checked() {
+        if self.metadata_sm.all_checked().await {
             return Ok(());
         }
 
         let piece_info = {
             let mut metadata_log_man = self.metadata_piece_activity_man.write().await;
-            metadata_log_man.sync(&mut metadata_pm)?;
+            metadata_log_man.sync(&mut self.metadata_sm)?;
             metadata_log_man.pull_req(&peer.peer_id)
         };
 
