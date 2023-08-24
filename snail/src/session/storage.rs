@@ -283,13 +283,13 @@ impl StorageManager {
         old
     }
 
-    fn save_bits(&mut self) -> Result<()> {
+    pub fn save_bits(&mut self) -> Result<()> {
         debug!(name=?self.name, "save bits");
         fs::write(&self.checked_bits_path, self.checked_bits.to_bytes())?;
         Ok(())
     }
 
-    fn load_bits(&mut self) -> Result<()> {
+    pub fn load_bits(&mut self) -> Result<()> {
         debug!(name=?self.name, "load bits");
 
         if let Some(bits) = self.read_bit_vec(&self.checked_bits_path, self.checked_bits.len()) {

@@ -131,7 +131,6 @@ fn persistent_torrent_file(session: &TorrentSession, f: &Path) -> Result<()> {
 
     let tf = session.torrent.blocking_read();
 
-
     if tf.is_none() {
         warn!("torrent file not found");
         return Ok(());
@@ -150,14 +149,23 @@ fn persistent_torrent_file(session: &TorrentSession, f: &Path) -> Result<()> {
     Ok(())
 }
 
-fn persistent_state(session: &TorrentSession, f: &Path) -> Result<()> {
+fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
+    {
+        let mut sm = session.sm.blocking_write();
+        sm.save_bits()?;
+    }
+    {
+        let mut sm = session.metadata_sm.blocking_write();
+        sm.save_bits()?;
+    }
     Ok(())
 }
 
-pub(crate) fn persistent_session(session: &TorrentSession, dir: &Path) -> Result<()> {
+pub(crate) fn persistent_session_helper(session: &TorrentSession, dir: &Path) -> Result<()> {
     persistent_torrent_file(
         &session,
         &dir.with_file_name(format!("{}.torrent", session.info_hash.hex())),
     )?;
+    persistent_piece_state(session)?;
     Ok(())
 }

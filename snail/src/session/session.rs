@@ -33,6 +33,8 @@ use tokio_util::sync::CancellationToken;
 use torrent::HashId;
 use tracing::{debug, error, info, instrument};
 
+use super::utils::persistent_session_helper;
+
 const METADATA_PIECE_SIZE: usize = 16384;
 
 #[derive(Default)]
@@ -1057,7 +1059,9 @@ impl TorrentSession {
         Arc::clone(&self.peers)
     }
 
-    pub fn persistent(&self, directory: &Path) -> Result<()> {
+    pub fn persistent_session(&self) -> Result<()> {
+        let path = PathBuf::from_str(&self.cfg.data_dir).unwrap();
+        persistent_session_helper(self, &path)?;
         Ok(())
     }
 }
