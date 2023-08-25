@@ -172,15 +172,15 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn all_checked(&self) -> bool {
+    pub fn all_checked(&self) -> bool {
         self.checked_bits.all()
     }
 
-    pub async fn is_checked(&self, index: usize) -> bool {
+    pub fn is_checked(&self, index: usize) -> bool {
         self.checked_bits[index]
     }
 
-    pub async fn assume_checked(&mut self) {
+    pub fn assume_checked(&mut self) {
         for i in 0..self.piece_num {
             self.checked_bits.set(i, true);
         }
@@ -341,6 +341,179 @@ impl Inner {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StorageManager {
+    inner: Arc<RwLock<Inner>>,
+}
+
+impl StorageManager {
+    pub async fn from_torrent_info(data_dir: impl AsRef<Path>, info: &TorrentInfo) -> Result<Self> {
+        let inner = Inner::from_torrent_info(data_dir, info).await?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
+    pub async fn reinit_from_torrent(
+        &self,
+        data_dir: impl AsRef<Path>,
+        info: &TorrentInfo,
+    ) -> Result<()> {
+        let inner = Inner::from_torrent_info(data_dir, info).await?;
+        let mut self_inner = self.inner.write().await;
+        *self_inner = inner;
+        Ok(())
+    }
+
+    pub async fn from_single_file(
+        path: impl AsRef<Path>,
+        total_size: usize,
+        piece_len: usize,
+    ) -> Result<Self> {
+        let inner = Inner::from_single_file(path, total_size, piece_len).await?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
+    pub async fn reinit_from_file(
+        &self,
+        path: impl AsRef<Path>,
+        total_size: usize,
+        piece_len: usize,
+    ) -> Result<()> {
+        let new_inner = Inner::from_single_file(path, total_size, piece_len).await?;
+        let mut inner = self.inner.write().await;
+        *inner = new_inner;
+        Ok(())
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Inner::empty())),
+        }
+    }
+
+    pub async fn fetch(&self, index: usize) -> Result<Piece> {
+        let mut inner = self.inner.write().await;
+        inner.fetch(index).await
+    }
+
+    pub async fn write(&self, piece: Piece) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.write(piece).await
+    }
+
+    pub async fn read(&self, index: usize) -> Result<Piece> {
+        let mut inner = self.inner.write().await;
+        inner.read(index).await
+    }
+
+    pub async fn clear_all_checked_bits(&self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.clear_all_checked_bits().await
+    }
+
+    pub async fn all_checked(&self) -> bool {
+        let inner = self.inner.write().await;
+        inner.all_checked()
+    }
+
+    pub async fn is_checked(&self, index: usize) -> bool {
+        let inner = self.inner.read().await;
+        inner.is_checked(index)
+    }
+
+    pub fn blocking_is_checked(&self, index: usize) -> bool {
+        let inner = self.inner.blocking_read();
+        inner.is_checked(index)
+    }
+
+    pub async fn assume_checked(&self) {
+        let mut inner = self.inner.write().await;
+        inner.assume_checked()
+    }
+
+    pub async fn fix_file_size(&self, path: impl AsRef<Path>) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.fix_file_size(path).await
+    }
+
+    pub async fn check(&self, index: usize, checksum: &[u8]) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        inner.check(index, checksum).await
+    }
+
+    pub async fn check_file<'a>(
+        &mut self,
+        path: impl AsRef<Path>,
+        checksum_fn: impl Fn(usize) -> &'a [u8],
+    ) -> Result<bool> {
+        let mut inner = self.inner.write().await;
+        inner.check_file(path, checksum_fn).await
+    }
+
+    pub async fn flush(&self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.flush().await
+    }
+
+    pub async fn piece_len(&self, index: usize) -> usize {
+        let inner = self.inner.write().await;
+        inner.piece_len(index).await
+    }
+
+    pub async fn piece_num(&self) -> usize {
+        let inner = self.inner.read().await;
+        inner.piece_num().await
+    }
+
+    pub async fn total_size(&self) -> usize {
+        let inner = self.inner.write().await;
+        inner.total_size().await
+    }
+
+    pub async fn cache_size(&self) -> usize {
+        let inner = self.inner.write().await;
+        inner.cache_size().await
+    }
+
+    pub async fn update_cache_size(&self, size: usize) -> usize {
+        let mut inner = self.inner.write().await;
+        inner.update_cache_size(size).await
+    }
+
+    pub async fn save_bits(&self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.save_bits().await
+    }
+
+    pub async fn load_bits(&self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.load_bits().await
+    }
+
+    async fn read_bit_vec(&self, path: &Path, bit_len: usize) -> Option<BitVec> {
+        let inner = self.inner.write().await;
+        inner.read_bit_vec(path, bit_len).await
+    }
+
+    pub async fn checked_bits(&self) -> BitVec {
+        let inner = self.inner.write().await;
+        inner.checked_bits().await.clone()
+    }
+
+    pub async fn paths(&self) -> Vec<PathBuf> {
+        let inner = self.inner.write().await;
+        inner.paths().await
+    }
+
+    pub async fn maps(&self) -> Vec<Arc<FilePieceMap>> {
+        let inner = self.inner.read().await;
+        inner.maps().await
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use std::{
@@ -369,7 +542,8 @@ pub mod tests {
 
         let torrent = TorrentFile::from_path(&torrent_path)?;
 
-        let pm = StorageManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info).await?;
+        let pm = StorageManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info)
+            .await?;
         Ok((torrent, pm))
     }
 
@@ -493,150 +667,5 @@ pub mod tests {
         }
 
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StorageManager {
-    inner: Arc<RwLock<Inner>>,
-}
-
-impl StorageManager {
-    pub async fn from_torrent_info(data_dir: impl AsRef<Path>, info: &TorrentInfo) -> Result<Self> {
-        let inner = Inner::from_torrent_info(data_dir, info).await?;
-        Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
-        })
-    }
-
-    pub async fn from_single_file(
-        path: impl AsRef<Path>,
-        total_size: usize,
-        piece_len: usize,
-    ) -> Result<Self> {
-        let inner = Inner::from_single_file(path, total_size, piece_len).await?;
-        Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
-        })
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(Inner::empty())),
-        }
-    }
-
-    pub async fn fetch(&self, index: usize) -> Result<Piece> {
-        let mut inner = self.inner.write().await;
-        inner.fetch(index).await
-    }
-
-    pub async fn write(&self, piece: Piece) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.write(piece).await
-    }
-
-    pub async fn read(&self, index: usize) -> Result<Piece> {
-        let mut inner = self.inner.write().await;
-        inner.read(index).await
-    }
-
-    pub async fn clear_all_checked_bits(&self) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.clear_all_checked_bits().await
-    }
-
-    pub async fn all_checked(&self) -> bool {
-        let inner = self.inner.write().await;
-        inner.all_checked().await
-    }
-
-    pub async fn is_checked(&self, index: usize) -> bool {
-        let inner = self.inner.write().await;
-        inner.is_checked(index).await
-    }
-
-    pub async fn assume_checked(&self) {
-        let mut inner = self.inner.write().await;
-        inner.assume_checked().await
-    }
-
-    pub async fn fix_file_size(&self, path: impl AsRef<Path>) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.fix_file_size(path).await
-    }
-
-    pub async fn check(&self, index: usize, checksum: &[u8]) -> Result<bool> {
-        let mut inner = self.inner.write().await;
-        inner.check(index, checksum).await
-    }
-
-    pub async fn check_file<'a>(
-        &mut self,
-        path: impl AsRef<Path>,
-        checksum_fn: impl Fn(usize) -> &'a [u8],
-    ) -> Result<bool> {
-        let mut inner = self.inner.write().await;
-        inner.check_file(path, checksum_fn).await
-    }
-
-    pub async fn flush(&self) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.flush().await
-    }
-
-    pub async fn piece_len(&self, index: usize) -> usize {
-        let inner = self.inner.write().await;
-        inner.piece_len(index).await
-    }
-
-    pub async fn piece_num(&self) -> usize {
-        let inner = self.inner.read().await;
-        inner.piece_num().await
-    }
-
-    pub async fn total_size(&self) -> usize {
-        let inner = self.inner.write().await;
-        inner.total_size().await
-    }
-
-    pub async fn cache_size(&self) -> usize {
-        let inner = self.inner.write().await;
-        inner.cache_size().await
-    }
-
-    pub async fn update_cache_size(&self, size: usize) -> usize {
-        let mut inner = self.inner.write().await;
-        inner.update_cache_size(size).await
-    }
-
-    pub async fn save_bits(&mut self) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.save_bits().await
-    }
-
-    pub async fn load_bits(&mut self) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.load_bits().await
-    }
-
-    async fn read_bit_vec(&self, path: &Path, bit_len: usize) -> Option<BitVec> {
-        let inner = self.inner.write().await;
-        inner.read_bit_vec(path, bit_len).await
-    }
-
-    pub async fn checked_bits(&self) -> BitVec {
-        let inner = self.inner.write().await;
-        inner.checked_bits().await.clone()
-    }
-
-    pub async fn paths(&self) -> Vec<PathBuf> {
-        let inner = self.inner.write().await;
-        inner.paths().await
-    }
-
-    pub async fn maps(&self) -> Vec<Arc<FilePieceMap>> {
-        let inner = self.inner.read().await;
-        inner.maps().await
     }
 }

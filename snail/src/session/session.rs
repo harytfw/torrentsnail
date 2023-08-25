@@ -87,7 +87,6 @@ impl TorrentSessionBuilder {
         }
     }
 
-
     pub fn info_hash(&self) -> Option<HashId> {
         self.info_hash
     }
@@ -202,11 +201,13 @@ impl TorrentSessionBuilder {
                 &torrent_path,
                 metadata_buf.len(),
                 METADATA_PIECE_SIZE,
-            ).await?;
+            )
+            .await?;
             metadata_cache.assume_checked();
 
             if self.check_files {
-                let paths: Vec<PathBuf> = pm.paths().await.iter().map(|p| p.to_path_buf()).collect();
+                let paths: Vec<PathBuf> =
+                    pm.paths().await.iter().map(|p| p.to_path_buf()).collect();
                 for path in paths {
                     let pass = pm
                         .check_file(&path, |i| torrent.info.get_piece_sha1(i))
@@ -672,11 +673,9 @@ impl TorrentSession {
                 .and_then(|ext| ext.get_metadata_size())
             {
                 debug!(?total_len, "create torrent metadata piece manager");
-                self.metadata_sm = StorageManager::from_single_file(
-                    "/tmp/snail_tmp.torrent",
-                    total_len,
-                    METADATA_PIECE_SIZE,
-                ).await?;
+                self.metadata_sm
+                    .reinit_from_file("/tmp/snail_tmp.torrent", total_len, METADATA_PIECE_SIZE)
+                    .await?;
             }
         }
 
@@ -686,7 +685,7 @@ impl TorrentSession {
 
         let piece_info = {
             let mut metadata_log_man = self.metadata_piece_activity_man.write().await;
-            metadata_log_man.sync(&mut self.metadata_sm)?;
+            metadata_log_man.sync(&self.metadata_sm).await?;
             metadata_log_man.pull_req(&peer.peer_id)
         };
 
@@ -753,8 +752,7 @@ impl TorrentSession {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 {
                     let mut log_man = self.piece_activity_man.write().await;
-                    let mut pm = self.sm.write().await;
-                    log_man.sync(&mut pm)?;
+                    log_man.sync(&self.sm).await?;
                 }
                 // let mut broken_peers = vec![];
                 let candidate_peer_id =
@@ -891,10 +889,9 @@ impl TorrentSession {
             loop {
                 while let Some((peer, info)) = peer_req_rx.recv().await {
                     {
-                        let mut pm = self.sm.write().await;
                         let index = info.index;
-                        if pm.is_checked(index) {
-                            let piece = pm.fetch(index).await?;
+                        if self.sm.is_checked(index).await {
+                            let piece = self.sm.fetch(index).await?;
                             let piece_data = PieceData::new(
                                 index,
                                 info.begin,
@@ -985,9 +982,10 @@ impl TorrentSession {
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     pub async fn start(&self) -> Result<()> {
         {
-            let pm = self.sm.read().await;
-            let checked_num = (0..pm.piece_num()).filter(|&i| pm.is_checked(i)).count();
-            debug!(piece_num=?pm.piece_num(), ?checked_num)
+            let checked_num = (0..self.sm.piece_num().await)
+                .filter(|&i| self.sm.blocking_is_checked(i))
+                .count();
+            debug!(piece_num=?self.sm.piece_num().await, ?checked_num)
         }
         self.dht.search_info_hash(&self.info_hash).await?;
         self.announce_tracker_event(tracker::Event::Started).await?;
@@ -1006,8 +1004,7 @@ impl TorrentSession {
             self.peers.clear();
         }
         {
-            let mut pm = self.sm.write().await;
-            pm.flush().await?;
+            self.sm.flush().await?;
         }
         self.status
             .store(TorrentSessionStatus::Stopped as u32, Ordering::Release);
@@ -1035,16 +1032,15 @@ impl TorrentSession {
             while long_term.join_next().await.is_some() {}
         }
         {
-            let mut cache = self.sm.write().await;
-            if let Err(err) = cache.flush().await {
+            if let Err(err) = self.sm.flush().await {
                 error!(?err)
             }
         }
         Ok(())
     }
 
-    pub fn piece_manager(&self) -> Arc<RwLock<StorageManager>> {
-        Arc::clone(&self.sm)
+    pub fn piece_manager(&self) -> StorageManager {
+        self.sm.clone()
     }
 
     pub fn tracker(&self) -> TrackerClient {
@@ -1055,9 +1051,9 @@ impl TorrentSession {
         Arc::clone(&self.peers)
     }
 
-    pub fn persistent_session(&self) -> Result<()> {
+    pub async fn persistent(&self) -> Result<()> {
         let path = PathBuf::from_str(&self.cfg.data_dir).unwrap();
-        persistent_session_helper(self, &path)?;
+        persistent_session_helper(self, &path).await?;
         Ok(())
     }
 }

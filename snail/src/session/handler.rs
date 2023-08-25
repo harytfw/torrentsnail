@@ -51,7 +51,7 @@ impl TorrentSession {
             BTMessage::BitField(bits) => {
                 let mut state = peer.state.write().await;
                 let mut bits = bit_vec::BitVec::from_bytes(bits);
-                let piece_num = { self.sm.read().await.piece_num() };
+                let piece_num = { self.sm.piece_num().await };
 
                 bits.truncate(piece_num);
 
@@ -121,11 +121,10 @@ impl TorrentSession {
 
                 let msg: UTMetadataMessage = {
                     let index = *index;
-                    let mut metadata_pm = self.metadata_sm.write().await;
-                    let total_size = metadata_pm.total_size().await;
+                    let total_size = self.metadata_sm.total_size().await;
 
-                    if metadata_pm.is_checked(index).await {
-                        let piece = metadata_pm.read(index).await?;
+                    if self.metadata_sm.is_checked(index).await {
+                        let piece = self.metadata_sm.read(index).await?;
                         let piece_data = UTMetadataPieceData {
                             piece: index,
                             total_size,
@@ -154,19 +153,18 @@ impl TorrentSession {
                 };
                 let index = piece.index();
                 let sha1 = piece.sha1();
-                let mut metadata_pm = self.metadata_sm.write().await;
                 // TODO: handle error
-                metadata_pm.write(piece).await?;
-                let checked = metadata_pm.check(index, &sha1).await?;
+                self.metadata_sm.write(piece).await?;
+                let checked = self.metadata_sm.check(index, &sha1).await?;
                 debug!(index, checked);
-                if metadata_pm.all_checked() {
+                if self.metadata_sm.all_checked().await {
                     {
                         let mut log_man = self.metadata_piece_activity_man.write().await;
-                        log_man.sync(&mut metadata_pm)?;
+                        log_man.sync(&self.metadata_sm).await?;
                     }
-                    let mut buf = Vec::with_capacity(metadata_pm.total_size());
-                    for i in 0..metadata_pm.piece_num() {
-                        let piece = metadata_pm.fetch(i).await?;
+                    let mut buf = Vec::with_capacity(self.metadata_sm.total_size().await);
+                    for i in 0..self.metadata_sm.piece_num().await {
+                        let piece = self.metadata_sm.fetch(i).await?;
                         buf.extend(piece.buf())
                     }
                     torrent_metadata_buf = Some(buf);
@@ -186,8 +184,7 @@ impl TorrentSession {
 
             if self.info_hash != computed_info_hash {
                 debug!("info hash not match");
-                let mut metadata_pm = self.metadata_sm.write().await;
-                metadata_pm.clear_all_checked_bits()?;
+                self.metadata_sm.clear_all_checked_bits().await?;
                 return Ok(());
             }
 
@@ -200,11 +197,11 @@ impl TorrentSession {
             let piece_len = info.piece_length;
             {
                 debug!(?total_len, ?piece_len, "construct pieces");
-                let mut cache = self.sm.write().await;
-                *cache = StorageManager::from_torrent_info(self.storage_dir.as_ref(), &info)?;
+                self.sm
+                    .reinit_from_torrent(self.storage_dir.as_ref(), &info).await?;
 
                 let mut log_man = self.piece_activity_man.write().await;
-                log_man.sync(&mut cache)?;
+                log_man.sync(&self.sm).await?;
             }
             {
                 debug!("save torrent info");

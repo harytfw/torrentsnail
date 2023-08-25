@@ -149,23 +149,21 @@ fn persistent_torrent_file(session: &TorrentSession, f: &Path) -> Result<()> {
     Ok(())
 }
 
-fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
+async fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
     {
-        let mut sm = session.sm.blocking_write();
-        sm.save_bits()?;
+        session.sm.save_bits().await?;
     }
     {
-        let mut sm = session.metadata_sm.blocking_write();
-        sm.save_bits()?;
+        session.metadata_sm.save_bits().await?;
     }
     Ok(())
 }
 
-pub(crate) fn persistent_session_helper(session: &TorrentSession, dir: &Path) -> Result<()> {
+pub(crate) async fn persistent_session_helper(session: &TorrentSession, dir: &Path) -> Result<()> {
     persistent_torrent_file(
         &session,
         &dir.with_file_name(format!("{}.torrent", session.info_hash.hex())),
     )?;
-    persistent_piece_state(session)?;
+    persistent_piece_state(session).await?;
     Ok(())
 }

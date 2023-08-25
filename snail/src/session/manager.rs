@@ -72,16 +72,16 @@ impl PieceActivityManager {
         self.peer_owned_pieces.clear();
     }
 
-    pub fn sync(&mut self, sm: &mut StorageManager) -> Result<()> {
-        self.all_checked = sm.all_checked();
+    pub async fn sync(&mut self, sm: &StorageManager) -> Result<()> {
+        self.all_checked = sm.all_checked().await;
 
         if self.all_checked {
             self.clear();
             return Ok(());
         }
 
-        for i in 0..sm.piece_num() {
-            if sm.is_checked(i) {
+        for i in 0..sm.piece_num().await {
+            if sm.is_checked(i).await {
                 debug!(index=?i, "piece is finished, remove log");
                 self.piece_state.remove(&i);
             }
@@ -90,8 +90,8 @@ impl PieceActivityManager {
         let remain_req = self.max_req.saturating_sub(self.piece_state.len());
 
         let candidate_indices: Vec<usize> = {
-            let mut list: Vec<usize> = (0..sm.piece_num())
-                .filter(|&i| !sm.is_checked(i) && !self.piece_state.contains_key(&i))
+            let mut list: Vec<usize> = (0..sm.piece_num().await)
+                .filter(|&i| !(sm.blocking_is_checked(i)) && !self.piece_state.contains_key(&i))
                 .collect();
             shuffle_slice(&mut list);
             list.truncate(remain_req);
@@ -100,7 +100,7 @@ impl PieceActivityManager {
 
         for index in candidate_indices {
             self.piece_state
-                .insert(index, PieceActivityState::new(index, sm.piece_len(index)));
+                .insert(index, PieceActivityState::new(index, sm.piece_len(index).await));
         }
 
         Ok(())
@@ -243,20 +243,20 @@ mod tests {
         let mut plm = PieceActivityManager::new();
         plm.clear();
 
-        let (torrent, mut pm) = setup_storage_manager()?;
+        let (torrent, mut pm) = setup_storage_manager().await?;
         let mut pieces: Vec<Piece> = vec![];
-        for i in 0..pm.piece_num() {
+        for i in 0..pm.piece_num().await {
             pieces.push(pm.read(i).await.unwrap());
         }
-        pm.clear_all_checked_bits()?;
+        pm.clear_all_checked_bits().await?;
 
-        plm.sync(&mut pm)?;
+        plm.sync(&mut pm).await?;
 
         assert!(!plm.pull_req(&peer_id).is_empty());
         assert!(plm.pull_req(&peer_id).is_empty());
 
         plm.clear();
-        plm.sync(&mut pm)?;
+        plm.sync(&mut pm).await?;
 
         assert!(!plm.pull_req(&peer_id).is_empty());
 
