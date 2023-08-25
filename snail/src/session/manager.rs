@@ -9,7 +9,9 @@ use bit_vec::BitVec;
 use std::cmp;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 use tracing::debug;
 
 struct PieceActivityState {
@@ -99,8 +101,10 @@ impl PieceActivityManager {
         };
 
         for index in candidate_indices {
-            self.piece_state
-                .insert(index, PieceActivityState::new(index, sm.piece_len(index).await));
+            self.piece_state.insert(
+                index,
+                PieceActivityState::new(index, sm.piece_len(index).await),
+            );
         }
 
         Ok(())
@@ -219,6 +223,52 @@ impl PieceActivityManager {
         if let Some(log) = self.piece_state.get_mut(&index) {
             log.reject.insert(*peer_id);
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct AtomicPieceActivityManager {
+    inner: Arc<RwLock<PieceActivityManager>>,
+}
+
+impl AtomicPieceActivityManager {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(PieceActivityManager::new())),
+        }
+    }
+
+    pub async fn sync(&self, sm: &StorageManager) -> Result<()> {
+        self.inner.write().await.sync(sm).await
+    }
+
+    pub async fn sync_peer_pieces(&self, peer_id: &HashId, pieces: &BitVec) -> Result<()> {
+        self.inner.write().await.sync_peer_pieces(peer_id, pieces)
+    }
+
+    pub async fn pull_req(&self, peer_id: &HashId) -> Vec<PieceInfo> {
+        self.inner.write().await.pull_req(peer_id)
+    }
+
+    pub async fn on_piece_data(
+        &self,
+        index: usize,
+        begin: usize,
+        buf: &[u8],
+        peer_id: &HashId,
+    ) -> Option<Piece> {
+        self.inner
+            .write()
+            .await
+            .on_piece_data(index, begin, buf, peer_id)
+    }
+
+    pub async fn used_indices(&self) -> Vec<usize> {
+        self.inner.read().await.used_indices()
+    }
+
+    pub async fn on_reject(&self, index: usize, peer_id: &HashId) {
+        self.inner.write().await.on_reject(index, peer_id)
     }
 }
 

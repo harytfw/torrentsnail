@@ -33,7 +33,8 @@ use tokio_util::sync::CancellationToken;
 use torrent::HashId;
 use tracing::{debug, error, info, instrument};
 
-use super::utils::persistent_session_helper;
+use crate::session::manager::AtomicPieceActivityManager;
+use crate::session::utils::persistent_session_helper;
 
 const METADATA_PIECE_SIZE: usize = 16384;
 
@@ -172,7 +173,7 @@ impl TorrentSessionBuilder {
 
         let mut pm: StorageManager;
         let mut metadata_cache: StorageManager;
-        let piece_log_man = PieceActivityManager::new();
+        let piece_log_man = AtomicPieceActivityManager::new();
         let metadata_log_man = PieceActivityManager::new();
 
         let mut torrent = self.torrent.take();
@@ -246,7 +247,7 @@ impl TorrentSessionBuilder {
             peer_conn_req_tx,
             peer_piece_req_tx,
             sm: pm,
-            piece_activity_man: Arc::new(RwLock::new(piece_log_man)),
+            piece_activity_man: piece_log_man,
             metadata_piece_activity_man: Arc::new(RwLock::new(metadata_log_man)),
             long_term_tasks: Default::default(),
             short_term_tasks: Default::default(),
@@ -358,7 +359,7 @@ pub struct TorrentSession {
     short_term_tasks: Arc<RwLock<JoinSet<()>>>,
     pub(crate) sm: StorageManager,
     pub(crate) metadata_sm: StorageManager,
-    pub(crate) piece_activity_man: Arc<RwLock<PieceActivityManager>>,
+    pub(crate) piece_activity_man: AtomicPieceActivityManager,
     pub(crate) metadata_piece_activity_man: Arc<RwLock<PieceActivityManager>>,
 
     peer_conn_req_tx: mpsc::Sender<SocketAddr>,
@@ -637,8 +638,9 @@ impl TorrentSession {
         let mut all_checked = false;
 
         let complete_piece = {
-            let mut log_man = self.piece_activity_man.write().await;
-            log_man.on_piece_data(data.index, data.begin, &data.fragment, &peer.peer_id)
+            self.piece_activity_man
+                .on_piece_data(data.index, data.begin, &data.fragment, &peer.peer_id)
+                .await
         };
 
         if let Some(piece) = complete_piece {
@@ -719,10 +721,7 @@ impl TorrentSession {
 
         let state = { peer.state.read().await.clone() };
 
-        let pending_piece_info = {
-            let mut man = self.piece_activity_man.write().await;
-            man.pull_req(&peer.peer_id)
-        };
+        let pending_piece_info = { self.piece_activity_man.pull_req(&peer.peer_id).await };
 
         if state.choke {
             if !pending_piece_info.is_empty() {
@@ -751,8 +750,7 @@ impl TorrentSession {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 {
-                    let mut log_man = self.piece_activity_man.write().await;
-                    log_man.sync(&self.sm).await?;
+                    self.piece_activity_man.sync(&self.sm).await?;
                 }
                 // let mut broken_peers = vec![];
                 let candidate_peer_id =
@@ -788,8 +786,9 @@ impl TorrentSession {
                         debug!(?peer_id, "poll peer");
                         if let Some(peer) = self.peers.get(&peer_id) {
                             let state = peer.state.read().await;
-                            let mut log_man = self.piece_activity_man.write().await;
-                            log_man.sync_peer_pieces(&peer.peer_id, &state.owned_pieces)?;
+                            self.piece_activity_man
+                                .sync_peer_pieces(&peer.peer_id, &state.owned_pieces)
+                                .await?;
                         }
                         self.handle_peer(peer_id).await?;
 

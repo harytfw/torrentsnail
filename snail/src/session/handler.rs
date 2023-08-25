@@ -8,6 +8,7 @@ use crate::{
     torrent::{HashId, TorrentFile, TorrentInfo},
 };
 use tracing::{debug, instrument, warn};
+
 impl TorrentSession {
     #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
     pub(crate) async fn handle_message(&self, peer: &Peer, msg: &BTMessage) -> Result<()> {
@@ -200,8 +201,7 @@ impl TorrentSession {
                 self.sm
                     .reinit_from_torrent(self.storage_dir.as_ref(), &info).await?;
 
-                let mut log_man = self.piece_activity_man.write().await;
-                log_man.sync(&self.sm).await?;
+                self.piece_activity_man.sync(&self.sm).await?;
             }
             {
                 debug!("save torrent info");
