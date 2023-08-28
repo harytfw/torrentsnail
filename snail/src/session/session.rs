@@ -617,13 +617,15 @@ impl TorrentSession {
             }
         }
 
+        let snapshot = self.aux_sm.snapshot().await;
+
         if self.aux_sm.all_checked().await {
             return Ok(());
         }
 
         let piece_info = {
-            self.aux_am.sync(&self.aux_sm).await?;
-            self.aux_am.pull_req(&peer.peer_id).await
+            self.aux_am.sync(&snapshot).await?;
+            self.aux_am.request_piece(&peer.peer_id).await
         };
 
         let msg_id = peer
@@ -656,7 +658,7 @@ impl TorrentSession {
 
         let state = { peer.state.read().await.clone() };
 
-        let pending_piece_info = { self.main_am.pull_req(&peer.peer_id).await };
+        let pending_piece_info = { self.main_am.request_piece(&peer.peer_id).await };
 
         if state.choke {
             if !pending_piece_info.is_empty() {
@@ -685,7 +687,8 @@ impl TorrentSession {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 {
-                    self.main_am.sync(&self.main_sm).await?;
+                    let snapshot = self.main_sm.snapshot().await;
+                    self.main_am.sync(&snapshot).await?;
                 }
                 // let mut broken_peers = vec![];
                 let candidate_peer_id =

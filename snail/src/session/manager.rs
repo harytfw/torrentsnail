@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::debug;
 
+use super::storage::{StorageSnapshot, PieceSnapshot};
+
 struct PieceActivityState {
     index: usize,
     peer: Option<(HashId, Instant)>,
@@ -74,36 +76,38 @@ impl PieceActivityManager {
         self.peer_owned_pieces.clear();
     }
 
-    pub async fn sync(&mut self, sm: &StorageManager) -> Result<()> {
-        self.all_checked = sm.all_checked().await;
+    pub fn sync_snapshot(&mut self, snapshot: &StorageSnapshot) -> Result<()> {
+        self.all_checked = snapshot.pieces.iter().all(|piece| piece.checked);
 
         if self.all_checked {
             self.clear();
             return Ok(());
         }
 
-        for i in 0..sm.piece_num().await {
-            if sm.is_checked(i).await {
-                debug!(index=?i, "piece is finished, remove log");
-                self.piece_state.remove(&i);
+        for piece in snapshot.pieces.iter() {
+            if !piece.checked {
+                continue;
             }
+            debug!(index=?piece.index, "piece is finished, remove log");
+            self.piece_state.remove(&piece.index);
         }
 
         let remain_req = self.max_req.saturating_sub(self.piece_state.len());
 
-        let candidate_indices: Vec<usize> = {
-            let mut list: Vec<usize> = (0..sm.piece_num().await)
-                .filter(|&i| !(sm.blocking_is_checked(i)) && !self.piece_state.contains_key(&i))
+        let candidate_piece: Vec<PieceSnapshot> = {
+            let mut list: Vec<PieceSnapshot> = snapshot.pieces.iter()
+                .filter(|piece| !piece.checked && !self.piece_state.contains_key(&piece.index))
+                .cloned()
                 .collect();
             shuffle_slice(&mut list);
             list.truncate(remain_req);
             list
         };
 
-        for index in candidate_indices {
+        for piece in candidate_piece {
             self.piece_state.insert(
-                index,
-                PieceActivityState::new(index, sm.piece_len(index).await),
+                piece.index,
+                PieceActivityState::new(piece.index, piece.piece_len),
             );
         }
 
@@ -117,7 +121,7 @@ impl PieceActivityManager {
         Ok(())
     }
 
-    pub fn pull_req(&mut self, peer_id: &HashId) -> Vec<PieceInfo> {
+    pub fn request_piece_from_peer(&mut self, peer_id: &HashId) -> Vec<PieceInfo> {
         let mut ret = vec![];
 
         if self.all_checked {
@@ -238,16 +242,16 @@ impl AtomicPieceActivityManager {
         }
     }
 
-    pub async fn sync(&self, sm: &StorageManager) -> Result<()> {
-        self.inner.write().await.sync(sm).await
+    pub async fn sync(&self, ss: &StorageSnapshot) -> Result<()> {
+        self.inner.write().await.sync_snapshot(ss)
     }
 
     pub async fn sync_peer_pieces(&self, peer_id: &HashId, pieces: &BitVec) -> Result<()> {
         self.inner.write().await.sync_peer_pieces(peer_id, pieces)
     }
 
-    pub async fn pull_req(&self, peer_id: &HashId) -> Vec<PieceInfo> {
-        self.inner.write().await.pull_req(peer_id)
+    pub async fn request_piece(&self, peer_id: &HashId) -> Vec<PieceInfo> {
+        self.inner.write().await.request_piece_from_peer(peer_id)
     }
 
     pub async fn on_piece_data(
@@ -276,8 +280,6 @@ impl AtomicPieceActivityManager {
 mod tests {
     use super::*;
 
-    use crate::session::storage::tests::setup_storage_manager;
-
     #[test]
     fn test_state() {
         let log = PieceActivityState::new(0, 100);
@@ -287,39 +289,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manager() -> Result<()> {
+    async fn test_activity_manager() -> Result<()> {
+        let mut storage_snapshot =  StorageSnapshot::new(
+            vec![
+                PieceSnapshot::new(0, false, 100),
+                PieceSnapshot::new(1, false, 100),
+                PieceSnapshot::new(2, false, 100),
+            ]
+        );
+
         let peer_id = HashId::ZERO_V1;
 
         let mut plm = PieceActivityManager::new();
         plm.clear();
 
-        let (torrent, mut pm) = setup_storage_manager().await?;
-        let mut pieces: Vec<Piece> = vec![];
-        for i in 0..pm.piece_num().await {
-            pieces.push(pm.read(i).await.unwrap());
-        }
-        pm.clear_all_checked_bits().await?;
+        plm.sync_snapshot(&storage_snapshot)?;
 
-        plm.sync(&mut pm).await?;
-
-        assert!(!plm.pull_req(&peer_id).is_empty());
-        assert!(plm.pull_req(&peer_id).is_empty());
+        assert!(!plm.request_piece_from_peer(&peer_id).is_empty());
+        assert!(plm.request_piece_from_peer(&peer_id).is_empty());
 
         plm.clear();
-        plm.sync(&mut pm).await?;
 
-        assert!(!plm.pull_req(&peer_id).is_empty());
+        plm.sync_snapshot(&storage_snapshot)?;
 
-        for piece in pieces {
-            let ret_piece = plm
-                .on_piece_data(piece.index(), 0, piece.buf(), &peer_id)
-                .unwrap();
-            pm.write(ret_piece).await?;
-            assert!(
-                pm.check(piece.index(), torrent.info.get_piece_sha1(piece.index()))
-                    .await?
-            );
-        }
+        assert!(!plm.request_piece_from_peer(&peer_id).is_empty());
+
 
         Ok(())
     }

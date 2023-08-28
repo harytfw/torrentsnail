@@ -120,7 +120,7 @@ impl Inner {
             return Err(Error::PieceNotFound(index));
         }
 
-        let piece_len = self.piece_len(index).await;
+        let piece_len = self.piece_len(index);
         let mut pieces = [Piece::new(index, piece_len)];
         let mut handles = vec![];
 
@@ -255,7 +255,7 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn piece_len(&self, index: usize) -> usize {
+    pub fn piece_len(&self, index: usize) -> usize {
         if index >= self.piece_num {
             panic!("index out of bound");
         }
@@ -266,15 +266,15 @@ impl Inner {
         }
     }
 
-    pub async fn piece_num(&self) -> usize {
+    pub fn piece_num(&self) -> usize {
         self.piece_num
     }
 
-    pub async fn total_size(&self) -> usize {
+    pub fn total_size(&self) -> usize {
         self.total_size
     }
 
-    pub async fn cache_size(&self) -> usize {
+    pub fn cache_size(&self) -> usize {
         self.cache_size
     }
 
@@ -339,6 +339,50 @@ impl Inner {
     pub async fn maps(&self) -> Vec<Arc<FilePieceMap>> {
         self.maps.clone()
     }
+
+    pub async fn snapshot(&self) -> StorageSnapshot {
+        let mut ss = StorageSnapshot {
+            pieces: Vec::with_capacity(self.piece_num()),
+        };
+
+        for i in 0..self.piece_num() {
+            ss.pieces.push(PieceSnapshot {
+                index: i,
+                checked: self.is_checked(i),
+                piece_len: self.piece_len(i),
+            })
+        }
+
+        ss
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PieceSnapshot {
+    pub index: usize,
+    pub checked: bool,
+    pub piece_len: usize,
+}
+
+impl PieceSnapshot {
+    pub fn new(index: usize, checked: bool, piece_len: usize) -> Self {
+        Self {
+            index,
+            checked,
+            piece_len,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StorageSnapshot {
+    pub pieces: Vec<PieceSnapshot>,
+}
+
+impl StorageSnapshot {
+    pub fn new(pieces: Vec<PieceSnapshot>) -> Self {
+        Self { pieces }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -347,7 +391,10 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
-    pub async fn from_torrent_data_directory(data_dir: impl AsRef<Path>, info: &TorrentInfo) -> Result<Self> {
+    pub async fn from_torrent_data_directory(
+        data_dir: impl AsRef<Path>,
+        info: &TorrentInfo,
+    ) -> Result<Self> {
         let inner = Inner::from_torrent_info(data_dir, info).await?;
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -460,22 +507,22 @@ impl StorageManager {
 
     pub async fn piece_len(&self, index: usize) -> usize {
         let inner = self.inner.write().await;
-        inner.piece_len(index).await
+        inner.piece_len(index)
     }
 
     pub async fn piece_num(&self) -> usize {
         let inner = self.inner.read().await;
-        inner.piece_num().await
+        inner.piece_num()
     }
 
     pub async fn total_size(&self) -> usize {
         let inner = self.inner.write().await;
-        inner.total_size().await
+        inner.total_size()
     }
 
     pub async fn cache_size(&self) -> usize {
         let inner = self.inner.write().await;
-        inner.cache_size().await
+        inner.cache_size()
     }
 
     pub async fn update_cache_size(&self, size: usize) -> usize {
@@ -512,6 +559,11 @@ impl StorageManager {
         let inner = self.inner.read().await;
         inner.maps().await
     }
+
+    pub async fn snapshot(&self) -> StorageSnapshot {
+        let inner = self.inner.read().await;
+        inner.snapshot().await
+    }
 }
 
 #[cfg(test)]
@@ -542,8 +594,11 @@ pub mod tests {
 
         let torrent = TorrentFile::from_path(&torrent_path)?;
 
-        let pm = StorageManager::from_torrent_data_directory(torrent_path.parent().unwrap(), &torrent.info)
-            .await?;
+        let pm = StorageManager::from_torrent_data_directory(
+            torrent_path.parent().unwrap(),
+            &torrent.info,
+        )
+        .await?;
         Ok((torrent, pm))
     }
 
@@ -583,9 +638,11 @@ pub mod tests {
 
         let sha1_fn = |index: usize| torrent.info.get_piece_sha1(index);
 
-        let mut pm =
-            StorageManager::from_torrent_data_directory(torrent_path.parent().unwrap(), &torrent.info)
-                .await?;
+        let mut pm = StorageManager::from_torrent_data_directory(
+            torrent_path.parent().unwrap(),
+            &torrent.info,
+        )
+        .await?;
 
         // read and write same piece
         for i in 0..pm.piece_num().await {

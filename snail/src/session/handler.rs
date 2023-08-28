@@ -155,10 +155,12 @@ impl TorrentSession {
                 // TODO: handle error
                 self.aux_sm.write(piece).await?;
                 let checked = self.aux_sm.check(index, &sha1).await?;
+                let snapshot = self.aux_sm.snapshot().await;
+
                 debug!(index, checked);
                 if self.aux_sm.all_checked().await {
                     {
-                        self.aux_am.sync(&self.aux_sm).await?;
+                        self.aux_am.sync(&snapshot).await?;
                     }
                     let mut buf = Vec::with_capacity(self.aux_sm.total_size().await);
                     for i in 0..self.aux_sm.piece_num().await {
@@ -197,8 +199,9 @@ impl TorrentSession {
                 debug!(?total_len, ?piece_len, "construct pieces");
                 self.main_sm
                     .reinit_from_torrent(self.storage_dir.as_ref(), &info).await?;
-
-                self.main_am.sync(&self.main_sm).await?;
+                
+                let snapshot = self.main_sm.snapshot().await;
+                self.main_am.sync(&snapshot).await?;
             }
             {
                 debug!("save torrent info");
