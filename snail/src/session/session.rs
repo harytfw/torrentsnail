@@ -11,6 +11,7 @@ use crate::session::manager::PieceActivityManager;
 use crate::session::peer::Peer;
 use crate::session::storage::StorageManager;
 use crate::session::utils::make_announce_key;
+use crate::session::TorrentSessionStatus;
 use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
 use crate::{torrent, tracker, Error, Result, SNAIL_VERSION};
@@ -25,6 +26,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::fs::symlink;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::sync::{mpsc, RwLock};
@@ -43,7 +45,7 @@ pub struct TorrentSessionBuilder {
     info_hash: Option<HashId>,
     torrent_path: Option<PathBuf>,
     torrent: Option<TorrentFile>,
-    storage_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
     check_files: bool,
     dht: Option<DHT>,
     lsd: Option<LSD>,
@@ -106,9 +108,9 @@ impl TorrentSessionBuilder {
         }
     }
 
-    pub fn with_storage_dir(self, path: impl AsRef<Path>) -> Self {
+    pub fn with_data_dir(self, path: impl AsRef<Path>) -> Self {
         Self {
-            storage_dir: Some(path.as_ref().to_path_buf()),
+            data_dir: Some(path.as_ref().to_path_buf()),
             ..self
         }
     }
@@ -171,10 +173,8 @@ impl TorrentSessionBuilder {
             .my_id
             .ok_or_else(|| Error::Generic("no my_id".to_string()))?;
 
-        let mut pm: StorageManager;
-        let mut metadata_cache: StorageManager;
-        let piece_log_man = AtomicPieceActivityManager::new();
-        let metadata_log_man = PieceActivityManager::new();
+        let mut main_storage_manager = StorageManager::empty();
+        let mut aux_storage_manager = StorageManager::empty();
 
         let mut torrent = self.torrent.take();
         let mut info_hash = HashId::ZERO_V1;
@@ -183,42 +183,48 @@ impl TorrentSessionBuilder {
             info_hash = hash;
         }
 
-        let temp_dir = std::env::temp_dir();
-        let storage_dir: PathBuf = self.storage_dir.unwrap_or_else(|| temp_dir.join("snail"));
-        let torrent_path = self
-            .torrent_path
-            .unwrap_or_else(|| temp_dir.join("snail/tmp.torrent"));
+        let data_dir: PathBuf = self.data_dir.unwrap();
 
-        if torrent_path.try_exists().unwrap() {
+        let torrent_path = if let Some(path) = self.torrent_path {
+            let path_link = data_dir.join("main.torrent");
+            symlink(&path, &path_link).await?;
+            path_link
+        } else {
+            data_dir.join("main.torrent")
+        };
+
+        if torrent_path.try_exists()? {
             let torrent_file = TorrentFile::from_path(&torrent_path)?;
             torrent = Some(torrent_file);
         }
 
         if let Some(torrent) = torrent.as_ref() {
             info_hash = torrent.info_hash().unwrap();
-            pm = StorageManager::from_torrent_info(&storage_dir, &torrent.info).await?;
+            main_storage_manager =
+                StorageManager::from_torrent_data_directory(&data_dir, &torrent.info).await?;
             let metadata_buf = bencode::to_bytes(torrent.get_origin_info().unwrap())?;
-            metadata_cache = StorageManager::from_single_file(
+            aux_storage_manager = StorageManager::from_single_file(
                 &torrent_path,
                 metadata_buf.len(),
                 METADATA_PIECE_SIZE,
             )
             .await?;
-            metadata_cache.assume_checked();
+            aux_storage_manager.assume_checked().await;
 
             if self.check_files {
-                let paths: Vec<PathBuf> =
-                    pm.paths().await.iter().map(|p| p.to_path_buf()).collect();
+                let paths: Vec<PathBuf> = main_storage_manager
+                    .paths()
+                    .await
+                    .iter()
+                    .map(|p| p.to_path_buf())
+                    .collect();
                 for path in paths {
-                    let pass = pm
+                    let pass = main_storage_manager
                         .check_file(&path, |i| torrent.info.get_piece_sha1(i))
                         .await?;
                     debug!(?path, ?pass, "check file");
                 }
             }
-        } else {
-            pm = StorageManager::empty();
-            metadata_cache = StorageManager::empty();
         }
 
         let handshake_template = Self::build_handshake(&my_id, &info_hash);
@@ -241,19 +247,19 @@ impl TorrentSessionBuilder {
             tracker,
             peers: Arc::new(dashmap::DashMap::new()),
             info_hash: Arc::new(info_hash),
-            metadata_sm: metadata_cache,
+            aux_sm: aux_storage_manager,
             handshake_template: Arc::new(handshake_template),
             torrent: Arc::new(RwLock::new(torrent)),
             peer_conn_req_tx,
             peer_piece_req_tx,
-            sm: pm,
-            piece_activity_man: piece_log_man,
-            metadata_piece_activity_man: Arc::new(RwLock::new(metadata_log_man)),
+            sm: main_storage_manager,
+            piece_activity_man: AtomicPieceActivityManager::new(),
+            aux_am: AtomicPieceActivityManager::new(),
             long_term_tasks: Default::default(),
             short_term_tasks: Default::default(),
             cancel: CancellationToken::new(),
             status: Arc::new(AtomicU32::new(TorrentSessionStatus::Started as u32)),
-            storage_dir: Arc::new(storage_dir),
+            storage_dir: Arc::new(data_dir),
             lsd: self.lsd.unwrap(),
             dht: self.dht.unwrap(),
             my_id: self.my_id.unwrap(),
@@ -274,78 +280,6 @@ impl TorrentSessionBuilder {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum TorrentSessionStatus {
-    Stopped = 0,
-    Started,
-    Seeding,
-}
-
-impl FromPrimitive for TorrentSessionStatus {
-    fn from_i64(num: i64) -> Option<Self> {
-        Self::from_u64(num as u64)
-    }
-
-    fn from_u64(num: u64) -> Option<Self> {
-        let s = match num {
-            0 => Self::Started,
-            1 => Self::Stopped,
-            2 => Self::Seeding,
-            _ => return None,
-        };
-        Some(s)
-    }
-}
-
-impl ToPrimitive for TorrentSessionStatus {
-    fn to_i64(&self) -> Option<i64> {
-        Some(*self as i64)
-    }
-
-    fn to_u64(&self) -> Option<u64> {
-        Some(*self as u64)
-    }
-}
-
-impl fmt::Display for TorrentSessionStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::Started => "started",
-            Self::Stopped => "stopped",
-            Self::Seeding => "seeding",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-impl FromStr for TorrentSessionStatus {
-    type Err = Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "started" => Ok(Self::Started),
-            "stopped" => Ok(Self::Stopped),
-            "seeding" => Ok(Self::Seeding),
-            _ => Err(Error::Generic(format!("invalid status: {}", s))),
-        }
-    }
-}
-
-impl Serialize for TorrentSessionStatus {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for TorrentSessionStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).map_err(serde::de::Error::custom)
-    }
-}
-
 // TODO: reduce struct size
 #[derive(Clone)]
 pub struct TorrentSession {
@@ -358,9 +292,9 @@ pub struct TorrentSession {
     long_term_tasks: Arc<RwLock<JoinSet<()>>>,
     short_term_tasks: Arc<RwLock<JoinSet<()>>>,
     pub(crate) sm: StorageManager,
-    pub(crate) metadata_sm: StorageManager,
+    pub(crate) aux_sm: StorageManager,
     pub(crate) piece_activity_man: AtomicPieceActivityManager,
-    pub(crate) metadata_piece_activity_man: Arc<RwLock<PieceActivityManager>>,
+    pub(crate) aux_am: AtomicPieceActivityManager,
 
     peer_conn_req_tx: mpsc::Sender<SocketAddr>,
     pub(crate) peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
@@ -667,7 +601,7 @@ impl TorrentSession {
             .get(&peer_id)
             .ok_or(Error::Generic("peer not found".to_owned()))?;
 
-        if self.metadata_sm.total_size().await == 0 {
+        if self.aux_sm.total_size().await == 0 {
             if let Some(total_len) = peer
                 .handshake
                 .ext_handshake
@@ -675,20 +609,19 @@ impl TorrentSession {
                 .and_then(|ext| ext.get_metadata_size())
             {
                 debug!(?total_len, "create torrent metadata piece manager");
-                self.metadata_sm
+                self.aux_sm
                     .reinit_from_file("/tmp/snail_tmp.torrent", total_len, METADATA_PIECE_SIZE)
                     .await?;
             }
         }
 
-        if self.metadata_sm.all_checked().await {
+        if self.aux_sm.all_checked().await {
             return Ok(());
         }
 
         let piece_info = {
-            let mut metadata_log_man = self.metadata_piece_activity_man.write().await;
-            metadata_log_man.sync(&self.metadata_sm).await?;
-            metadata_log_man.pull_req(&peer.peer_id)
+            self.aux_am.sync(&self.aux_sm).await?;
+            self.aux_am.pull_req(&peer.peer_id).await
         };
 
         let msg_id = peer
@@ -1020,6 +953,7 @@ impl TorrentSession {
 
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     pub async fn shutdown(&self) -> Result<()> {
+        self.persist().await?;
         self.stop().await?;
         self.cancel.cancel();
         {
@@ -1050,9 +984,13 @@ impl TorrentSession {
         Arc::clone(&self.peers)
     }
 
-    pub async fn persistent(&self) -> Result<()> {
+    pub async fn persist(&self) -> Result<()> {
         let path = PathBuf::from_str(&self.cfg.data_dir).unwrap();
         persistent_session_helper(self, &path).await?;
         Ok(())
+    }
+
+    pub async fn check_files(&self) -> Result<bool> {
+        Ok(true)
     }
 }

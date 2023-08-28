@@ -4,7 +4,7 @@ use std::{
     convert,
     fmt::{Debug, Display},
     ops,
-    sync::Arc,
+    sync::Arc, hash::Hash,
 };
 
 fn valid_byte(ch: u8) -> bool {
@@ -203,6 +203,8 @@ impl ser::Serialize for HashId {
         serializer.serialize_bytes(self)
     }
 }
+
+pub type ArcHashId = Arc<HashId>;
 
 #[cfg(test)]
 mod test {

@@ -154,7 +154,7 @@ async fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
         session.sm.save_bits().await?;
     }
     {
-        session.metadata_sm.save_bits().await?;
+        session.aux_sm.save_bits().await?;
     }
     Ok(())
 }
@@ -162,7 +162,7 @@ async fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
 pub(crate) async fn persistent_session_helper(session: &TorrentSession, dir: &Path) -> Result<()> {
     persistent_torrent_file(
         &session,
-        &dir.with_file_name(format!("{}.torrent", session.info_hash.hex())),
+        &dir.with_file_name(format!("main.torrent",))
     )?;
     persistent_piece_state(session).await?;
     Ok(())

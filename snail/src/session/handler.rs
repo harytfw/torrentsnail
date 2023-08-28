@@ -122,10 +122,10 @@ impl TorrentSession {
 
                 let msg: UTMetadataMessage = {
                     let index = *index;
-                    let total_size = self.metadata_sm.total_size().await;
+                    let total_size = self.aux_sm.total_size().await;
 
-                    if self.metadata_sm.is_checked(index).await {
-                        let piece = self.metadata_sm.read(index).await?;
+                    if self.aux_sm.is_checked(index).await {
+                        let piece = self.aux_sm.read(index).await?;
                         let piece_data = UTMetadataPieceData {
                             piece: index,
                             total_size,
@@ -141,31 +141,28 @@ impl TorrentSession {
             }
 
             UTMetadataMessage::Reject(index) => {
-                let mut plm = self.metadata_piece_activity_man.write().await;
-                plm.on_reject(*index, &peer.peer_id)
+                self.aux_am.on_reject(*index, &peer.peer_id).await
             }
 
             UTMetadataMessage::Data(piece_data) => {
                 let piece = {
-                    let mut log_man = self.metadata_piece_activity_man.write().await;
-                    log_man
-                        .on_piece_data(piece_data.piece, 0, &piece_data.payload, &peer.peer_id)
+                    self.aux_am
+                        .on_piece_data(piece_data.piece, 0, &piece_data.payload, &peer.peer_id).await
                         .unwrap()
                 };
                 let index = piece.index();
                 let sha1 = piece.sha1();
                 // TODO: handle error
-                self.metadata_sm.write(piece).await?;
-                let checked = self.metadata_sm.check(index, &sha1).await?;
+                self.aux_sm.write(piece).await?;
+                let checked = self.aux_sm.check(index, &sha1).await?;
                 debug!(index, checked);
-                if self.metadata_sm.all_checked().await {
+                if self.aux_sm.all_checked().await {
                     {
-                        let mut log_man = self.metadata_piece_activity_man.write().await;
-                        log_man.sync(&self.metadata_sm).await?;
+                        self.aux_am.sync(&self.aux_sm).await?;
                     }
-                    let mut buf = Vec::with_capacity(self.metadata_sm.total_size().await);
-                    for i in 0..self.metadata_sm.piece_num().await {
-                        let piece = self.metadata_sm.fetch(i).await?;
+                    let mut buf = Vec::with_capacity(self.aux_sm.total_size().await);
+                    for i in 0..self.aux_sm.piece_num().await {
+                        let piece = self.aux_sm.fetch(i).await?;
                         buf.extend(piece.buf())
                     }
                     torrent_metadata_buf = Some(buf);
@@ -185,7 +182,7 @@ impl TorrentSession {
 
             if self.info_hash != computed_info_hash {
                 debug!("info hash not match");
-                self.metadata_sm.clear_all_checked_bits().await?;
+                self.aux_sm.clear_all_checked_bits().await?;
                 return Ok(());
             }
 

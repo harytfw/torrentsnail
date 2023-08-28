@@ -347,7 +347,7 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
-    pub async fn from_torrent_info(data_dir: impl AsRef<Path>, info: &TorrentInfo) -> Result<Self> {
+    pub async fn from_torrent_data_directory(data_dir: impl AsRef<Path>, info: &TorrentInfo) -> Result<Self> {
         let inner = Inner::from_torrent_info(data_dir, info).await?;
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -542,7 +542,7 @@ pub mod tests {
 
         let torrent = TorrentFile::from_path(&torrent_path)?;
 
-        let pm = StorageManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info)
+        let pm = StorageManager::from_torrent_data_directory(torrent_path.parent().unwrap(), &torrent.info)
             .await?;
         Ok((torrent, pm))
     }
@@ -584,7 +584,7 @@ pub mod tests {
         let sha1_fn = |index: usize| torrent.info.get_piece_sha1(index);
 
         let mut pm =
-            StorageManager::from_torrent_info(torrent_path.parent().unwrap(), &torrent.info)
+            StorageManager::from_torrent_data_directory(torrent_path.parent().unwrap(), &torrent.info)
                 .await?;
 
         // read and write same piece
