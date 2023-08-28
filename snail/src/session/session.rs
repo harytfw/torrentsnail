@@ -252,8 +252,8 @@ impl TorrentSessionBuilder {
             torrent: Arc::new(RwLock::new(torrent)),
             peer_conn_req_tx,
             peer_piece_req_tx,
-            sm: main_storage_manager,
-            piece_activity_man: AtomicPieceActivityManager::new(),
+            main_sm: main_storage_manager,
+            main_am: AtomicPieceActivityManager::new(),
             aux_am: AtomicPieceActivityManager::new(),
             long_term_tasks: Default::default(),
             short_term_tasks: Default::default(),
@@ -289,12 +289,9 @@ pub struct TorrentSession {
 
     peers: Arc<dashmap::DashMap<HashId, Peer>>,
     pub(crate) handshake_template: Arc<BTHandshake>,
+
     long_term_tasks: Arc<RwLock<JoinSet<()>>>,
     short_term_tasks: Arc<RwLock<JoinSet<()>>>,
-    pub(crate) sm: StorageManager,
-    pub(crate) aux_sm: StorageManager,
-    pub(crate) piece_activity_man: AtomicPieceActivityManager,
-    pub(crate) aux_am: AtomicPieceActivityManager,
 
     peer_conn_req_tx: mpsc::Sender<SocketAddr>,
     pub(crate) peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
@@ -308,6 +305,11 @@ pub struct TorrentSession {
     cfg: Arc<Config>,
     peer_to_poll_tx: mpsc::Sender<HashId>,
     pub name: String,
+
+    pub(crate) main_sm: StorageManager,
+    pub(crate) main_am: AtomicPieceActivityManager,
+    pub(crate) aux_sm: StorageManager,
+    pub(crate) aux_am: AtomicPieceActivityManager,
 }
 
 impl Debug for TorrentSession {
@@ -416,8 +418,8 @@ impl TorrentSession {
             return Err(Error::Generic("duplicate peer".into()));
         }
         {
-            if !self.sm.checked_bits().await.is_empty() {
-                peer.send_message_now(BTMessage::BitField(self.sm.checked_bits().await.to_bytes()))
+            if !self.main_sm.checked_bits().await.is_empty() {
+                peer.send_message_now(BTMessage::BitField(self.main_sm.checked_bits().await.to_bytes()))
                     .await?;
             }
         }
@@ -572,20 +574,20 @@ impl TorrentSession {
         let mut all_checked = false;
 
         let complete_piece = {
-            self.piece_activity_man
+            self.main_am
                 .on_piece_data(data.index, data.begin, &data.fragment, &peer.peer_id)
                 .await
         };
 
         if let Some(piece) = complete_piece {
-            self.sm.write(piece).await?;
-            let checked = self.sm.check(index, &sha1).await?;
-            all_checked = self.sm.all_checked().await;
+            self.main_sm.write(piece).await?;
+            let checked = self.main_sm.check(index, &sha1).await?;
+            all_checked = self.main_sm.all_checked().await;
             if checked {
                 peer.send_message_now(BTMessage::Have(index as u32)).await?;
             }
             if all_checked {
-                self.sm.flush().await?;
+                self.main_sm.flush().await?;
             }
         }
         if all_checked {
@@ -654,7 +656,7 @@ impl TorrentSession {
 
         let state = { peer.state.read().await.clone() };
 
-        let pending_piece_info = { self.piece_activity_man.pull_req(&peer.peer_id).await };
+        let pending_piece_info = { self.main_am.pull_req(&peer.peer_id).await };
 
         if state.choke {
             if !pending_piece_info.is_empty() {
@@ -683,7 +685,7 @@ impl TorrentSession {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 {
-                    self.piece_activity_man.sync(&self.sm).await?;
+                    self.main_am.sync(&self.main_sm).await?;
                 }
                 // let mut broken_peers = vec![];
                 let candidate_peer_id =
@@ -719,7 +721,7 @@ impl TorrentSession {
                         debug!(?peer_id, "poll peer");
                         if let Some(peer) = self.peers.get(&peer_id) {
                             let state = peer.state.read().await;
-                            self.piece_activity_man
+                            self.main_am
                                 .sync_peer_pieces(&peer.peer_id, &state.owned_pieces)
                                 .await?;
                         }
@@ -822,8 +824,8 @@ impl TorrentSession {
                 while let Some((peer, info)) = peer_req_rx.recv().await {
                     {
                         let index = info.index;
-                        if self.sm.is_checked(index).await {
-                            let piece = self.sm.fetch(index).await?;
+                        if self.main_sm.is_checked(index).await {
+                            let piece = self.main_sm.fetch(index).await?;
                             let piece_data = PieceData::new(
                                 index,
                                 info.begin,
@@ -914,10 +916,10 @@ impl TorrentSession {
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     pub async fn start(&self) -> Result<()> {
         {
-            let checked_num = (0..self.sm.piece_num().await)
-                .filter(|&i| self.sm.blocking_is_checked(i))
+            let checked_num = (0..self.main_sm.piece_num().await)
+                .filter(|&i| self.main_sm.blocking_is_checked(i))
                 .count();
-            debug!(piece_num=?self.sm.piece_num().await, ?checked_num)
+            debug!(piece_num=?self.main_sm.piece_num().await, ?checked_num)
         }
         self.dht.search_info_hash(&self.info_hash).await?;
         self.announce_tracker_event(tracker::Event::Started).await?;
@@ -936,7 +938,7 @@ impl TorrentSession {
             self.peers.clear();
         }
         {
-            self.sm.flush().await?;
+            self.main_sm.flush().await?;
         }
         self.status
             .store(TorrentSessionStatus::Stopped as u32, Ordering::Release);
@@ -965,7 +967,7 @@ impl TorrentSession {
             while long_term.join_next().await.is_some() {}
         }
         {
-            if let Err(err) = self.sm.flush().await {
+            if let Err(err) = self.main_sm.flush().await {
                 error!(?err)
             }
         }
@@ -973,7 +975,7 @@ impl TorrentSession {
     }
 
     pub fn piece_manager(&self) -> StorageManager {
-        self.sm.clone()
+        self.main_sm.clone()
     }
 
     pub fn tracker(&self) -> TrackerClient {

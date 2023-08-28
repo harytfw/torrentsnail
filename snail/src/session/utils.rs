@@ -151,7 +151,7 @@ fn persistent_torrent_file(session: &TorrentSession, f: &Path) -> Result<()> {
 
 async fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
     {
-        session.sm.save_bits().await?;
+        session.main_sm.save_bits().await?;
     }
     {
         session.aux_sm.save_bits().await?;

@@ -41,7 +41,7 @@ impl TorrentSession {
                 let index = *index as usize;
                 let mut state = peer.state.write().await;
                 if state.owned_pieces.is_empty() {
-                    let num = self.sm.piece_num().await;
+                    let num = self.main_sm.piece_num().await;
                     state.owned_pieces = bit_vec::BitVec::from_elem(num, false)
                 }
                 if index < state.owned_pieces.len() {
@@ -52,7 +52,7 @@ impl TorrentSession {
             BTMessage::BitField(bits) => {
                 let mut state = peer.state.write().await;
                 let mut bits = bit_vec::BitVec::from_bytes(bits);
-                let piece_num = { self.sm.piece_num().await };
+                let piece_num = { self.main_sm.piece_num().await };
 
                 bits.truncate(piece_num);
 
@@ -195,10 +195,10 @@ impl TorrentSession {
             let piece_len = info.piece_length;
             {
                 debug!(?total_len, ?piece_len, "construct pieces");
-                self.sm
+                self.main_sm
                     .reinit_from_torrent(self.storage_dir.as_ref(), &info).await?;
 
-                self.piece_activity_man.sync(&self.sm).await?;
+                self.main_am.sync(&self.main_sm).await?;
             }
             {
                 debug!("save torrent info");
