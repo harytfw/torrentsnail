@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use super::storage::{StorageSnapshot, PieceSnapshot};
+use super::storage::{PieceSnapshot, StorageSnapshot};
 
 struct PieceActivityState {
     index: usize,
@@ -77,7 +77,7 @@ impl PieceActivityManager {
     }
 
     pub fn sync_snapshot(&mut self, snapshot: &StorageSnapshot) -> Result<()> {
-        self.all_checked = snapshot.pieces.iter().all(|piece| piece.checked);
+        self.all_checked = snapshot.all_checked();
 
         if self.all_checked {
             self.clear();
@@ -95,7 +95,9 @@ impl PieceActivityManager {
         let remain_req = self.max_req.saturating_sub(self.piece_state.len());
 
         let candidate_piece: Vec<PieceSnapshot> = {
-            let mut list: Vec<PieceSnapshot> = snapshot.pieces.iter()
+            let mut list: Vec<PieceSnapshot> = snapshot
+                .pieces
+                .iter()
                 .filter(|piece| !piece.checked && !self.piece_state.contains_key(&piece.index))
                 .cloned()
                 .collect();
@@ -250,7 +252,7 @@ impl AtomicPieceActivityManager {
         self.inner.write().await.sync_peer_pieces(peer_id, pieces)
     }
 
-    pub async fn request_piece(&self, peer_id: &HashId) -> Vec<PieceInfo> {
+    pub async fn make_piece_request(&self, peer_id: &HashId) -> Vec<PieceInfo> {
         self.inner.write().await.request_piece_from_peer(peer_id)
     }
 
@@ -290,13 +292,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_activity_manager() -> Result<()> {
-        let mut storage_snapshot =  StorageSnapshot::new(
-            vec![
-                PieceSnapshot::new(0, false, 100),
-                PieceSnapshot::new(1, false, 100),
-                PieceSnapshot::new(2, false, 100),
-            ]
-        );
+        let mut storage_snapshot = StorageSnapshot::new(vec![
+            PieceSnapshot::new(0, false, 100, bytes::Bytes::from_static(&HashId::ZERO_V1)),
+            PieceSnapshot::new(1, false, 100, bytes::Bytes::from_static(&HashId::ZERO_V1)),
+            PieceSnapshot::new(2, false, 100, bytes::Bytes::from_static(&HashId::ZERO_V1)),
+        ]);
 
         let peer_id = HashId::ZERO_V1;
 
@@ -313,7 +313,6 @@ mod tests {
         plm.sync_snapshot(&storage_snapshot)?;
 
         assert!(!plm.request_piece_from_peer(&peer_id).is_empty());
-
 
         Ok(())
     }

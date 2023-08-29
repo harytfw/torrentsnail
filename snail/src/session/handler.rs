@@ -4,8 +4,8 @@ use crate::{
         BTExtMessage, BTMessage, LTDontHaveMessage, UTMetadataMessage, UTMetadataPieceData,
         MSG_LT_DONTHAVE, MSG_UT_METADATA,
     },
-    session::{storage::StorageManager, Peer, TorrentSession},
-    torrent::{HashId, TorrentFile, TorrentInfo},
+    session::{Peer, TorrentSession},
+    torrent::{HashId, TorrentInfo},
 };
 use tracing::{debug, instrument, warn};
 
@@ -140,21 +140,19 @@ impl TorrentSession {
                 peer.send_message_now((msg_id, msg)).await?;
             }
 
-            UTMetadataMessage::Reject(index) => {
-                self.aux_am.on_reject(*index, &peer.peer_id).await
-            }
+            UTMetadataMessage::Reject(index) => self.aux_am.on_reject(*index, &peer.peer_id).await,
 
             UTMetadataMessage::Data(piece_data) => {
                 let piece = {
                     self.aux_am
-                        .on_piece_data(piece_data.piece, 0, &piece_data.payload, &peer.peer_id).await
+                        .on_piece_data(piece_data.piece, 0, &piece_data.payload, &peer.peer_id)
+                        .await
                         .unwrap()
                 };
                 let index = piece.index();
-                let sha1 = piece.sha1();
                 // TODO: handle error
                 self.aux_sm.write(piece).await?;
-                let checked = self.aux_sm.check(index, &sha1).await?;
+                let checked = self.aux_sm.verify_checksum(index).await?;
                 let snapshot = self.aux_sm.snapshot().await;
 
                 debug!(index, checked);
@@ -188,7 +186,6 @@ impl TorrentSession {
                 return Ok(());
             }
 
-            let val: bencode::Value = bencode::from_bytes(&metadata_buf)?;
             let info: TorrentInfo = bencode::from_bytes(&metadata_buf)?;
 
             // TODO: add atomic bool to prevent session from using partial state
@@ -198,17 +195,11 @@ impl TorrentSession {
             {
                 debug!(?total_len, ?piece_len, "construct pieces");
                 self.main_sm
-                    .reinit_from_torrent(self.storage_dir.as_ref(), &info).await?;
-                
+                    .reinit_from_torrent(self.data_dir.as_ref(), &info)
+                    .await?;
+
                 let snapshot = self.main_sm.snapshot().await;
                 self.main_am.sync(&snapshot).await?;
-            }
-            {
-                debug!("save torrent info");
-                let mut torrent = TorrentFile::from_info(info.clone());
-                torrent.set_origin_info(val);
-                let mut torrent_lock = self.torrent.write().await;
-                *torrent_lock = Some(torrent)
             }
         }
         Ok(())

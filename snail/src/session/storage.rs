@@ -13,6 +13,15 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error};
 
+fn torrent_info_to_piece_sha1_checksum(info: &TorrentInfo) -> Vec<bytes::Bytes> {
+    let piece_sha1_checksum: Vec<bytes::Bytes> = (0..info.pieces_num())
+        .map(|i| info.get_piece_sha1(i))
+        .map(|buf| bytes::Bytes::copy_from_slice(buf))
+        .collect();
+
+    piece_sha1_checksum
+}
+
 #[derive(Debug, Default)]
 struct Inner {
     name: String,
@@ -25,6 +34,7 @@ struct Inner {
     checked_bits: BitVec,
     checked_bits_path: PathBuf,
     total_size: usize,
+    piece_checksum: Vec<bytes::Bytes>,
 }
 
 impl Inner {
@@ -65,6 +75,7 @@ impl Inner {
             checked_bits_path: data_dir.as_ref().join(".snail_checked_bits"),
             total_size: info.total_length(),
             checked_bits: BitVec::from_elem(piece_num, false),
+            piece_checksum: torrent_info_to_piece_sha1_checksum(info),
         };
         cache.load_bits().await?;
         Ok(cache)
@@ -100,8 +111,10 @@ impl Inner {
             cache_size: total_size,
             maps,
             checked_bits: BitVec::from_elem(piece_num, false),
+            // FIXME: use good path
             checked_bits_path: path.as_ref().join(".snail_checked_bits"),
             total_size,
+            piece_checksum: vec![],
         };
         cache.load_bits().await?;
         Ok(cache)
@@ -197,8 +210,9 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn check(&mut self, index: usize, checksum: &[u8]) -> Result<bool> {
+    pub async fn verify_checksum(&mut self, index: usize) -> Result<bool> {
         let piece = self.fetch(index).await?;
+        let checksum = self.piece_checksum[index].as_ref();
         let b = match checksum.len() {
             20 => piece.sha1() == checksum,
             32 => piece.sha256() == checksum,
@@ -208,11 +222,7 @@ impl Inner {
         Ok(b)
     }
 
-    pub async fn check_file<'a>(
-        &mut self,
-        path: impl AsRef<Path>,
-        checksum_fn: impl Fn(usize) -> &'a [u8],
-    ) -> Result<bool> {
+    pub async fn check_file<'a>(&mut self, path: impl AsRef<Path>) -> Result<bool> {
         let indices = self
             .maps
             .iter()
@@ -222,7 +232,7 @@ impl Inner {
         let mut b = true;
         for index in indices {
             self.cache.remove(&index);
-            b &= self.check(index, checksum_fn(index)).await?;
+            b &= self.verify_checksum(index).await?;
         }
         Ok(b)
     }
@@ -340,20 +350,25 @@ impl Inner {
         self.maps.clone()
     }
 
-    pub async fn snapshot(&self) -> StorageSnapshot {
+    pub fn snapshot(&self) -> StorageSnapshot {
         let mut ss = StorageSnapshot {
             pieces: Vec::with_capacity(self.piece_num()),
         };
 
         for i in 0..self.piece_num() {
-            ss.pieces.push(PieceSnapshot {
-                index: i,
-                checked: self.is_checked(i),
-                piece_len: self.piece_len(i),
-            })
+            ss.pieces.push(self.piece_snapshot(i))
         }
 
         ss
+    }
+
+    pub fn piece_snapshot(&self, index: usize) -> PieceSnapshot {
+        PieceSnapshot::new(
+            index,
+            self.is_checked(index),
+            self.piece_len(index),
+            self.piece_checksum[index].clone(),
+        )
     }
 }
 
@@ -362,14 +377,16 @@ pub struct PieceSnapshot {
     pub index: usize,
     pub checked: bool,
     pub piece_len: usize,
+    pub sha1: bytes::Bytes,
 }
 
 impl PieceSnapshot {
-    pub fn new(index: usize, checked: bool, piece_len: usize) -> Self {
+    pub fn new(index: usize, checked: bool, piece_len: usize, sha1: bytes::Bytes) -> Self {
         Self {
             index,
             checked,
             piece_len,
+            sha1,
         }
     }
 }
@@ -382,6 +399,10 @@ pub struct StorageSnapshot {
 impl StorageSnapshot {
     pub fn new(pieces: Vec<PieceSnapshot>) -> Self {
         Self { pieces }
+    }
+
+    pub fn all_checked(&self) -> bool {
+        self.pieces.iter().all(|p| p.checked)
     }
 }
 
@@ -486,18 +507,9 @@ impl StorageManager {
         inner.fix_file_size(path).await
     }
 
-    pub async fn check(&self, index: usize, checksum: &[u8]) -> Result<bool> {
+    pub async fn verify_checksum(&self, index: usize) -> Result<bool> {
         let mut inner = self.inner.write().await;
-        inner.check(index, checksum).await
-    }
-
-    pub async fn check_file<'a>(
-        &mut self,
-        path: impl AsRef<Path>,
-        checksum_fn: impl Fn(usize) -> &'a [u8],
-    ) -> Result<bool> {
-        let mut inner = self.inner.write().await;
-        inner.check_file(path, checksum_fn).await
+        inner.verify_checksum(index).await
     }
 
     pub async fn flush(&self) -> Result<()> {
@@ -562,7 +574,12 @@ impl StorageManager {
 
     pub async fn snapshot(&self) -> StorageSnapshot {
         let inner = self.inner.read().await;
-        inner.snapshot().await
+        inner.snapshot()
+    }
+
+    pub async fn piece_snapshot(&self, index: usize) -> PieceSnapshot {
+        let inner = self.inner.read().await;
+        inner.piece_snapshot(index)
     }
 }
 
@@ -607,7 +624,7 @@ pub mod tests {
         let mut pm = StorageManager::empty();
 
         assert!(pm.all_checked().await);
-        assert!(pm.check(0, &[0]).await.is_err());
+        assert!(pm.verify_checksum(0).await.is_err());
         assert!(pm.fetch(0).await.is_err());
         assert_eq!(pm.piece_num().await, 0);
 
@@ -651,7 +668,7 @@ pub mod tests {
         }
 
         for i in 0..pm.piece_num().await {
-            assert!(pm.check(i, sha1_fn(i)).await?);
+            assert!(pm.verify_checksum(i).await?);
         }
 
         for i in 0..pm.piece_num().await {
@@ -663,9 +680,9 @@ pub mod tests {
             let mut piece = origin_piece.clone();
             piece.buf_mut()[0..100].copy_from_slice(&[1; 100]);
             pm.write(piece).await?;
-            assert!(!pm.check(0, sha1_fn(0)).await?);
+            assert!(!pm.verify_checksum(0).await?);
             pm.write(origin_piece).await?;
-            assert!(pm.check(0, sha1_fn(0)).await?);
+            assert!(pm.verify_checksum(0).await?);
         }
 
         {
@@ -688,10 +705,6 @@ pub mod tests {
                 file.write_at(b"0", 0).unwrap();
             }
 
-            for p in paths.iter() {
-                assert!(!pm.check_file(p, sha1_fn).await.unwrap());
-            }
-
             for (p, byte) in paths.iter().zip(first_byte_vec.iter()) {
                 let file = fs::OpenOptions::new()
                     .write(true)
@@ -699,10 +712,6 @@ pub mod tests {
                     .open(p)
                     .unwrap();
                 file.write_at(std::slice::from_ref(byte), 0).unwrap();
-            }
-
-            for p in paths.iter() {
-                assert!(pm.check_file(p, sha1_fn).await.unwrap());
             }
         }
 

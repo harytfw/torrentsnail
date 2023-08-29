@@ -40,6 +40,10 @@ use crate::session::utils::persistent_session_helper;
 
 const METADATA_PIECE_SIZE: usize = 16384;
 
+fn compute_torrent_path(data_dir: &Path, info_hash: &HashId) -> PathBuf {
+    data_dir.join(format!("{}.torrent", info_hash.hex()))
+}
+
 #[derive(Default)]
 pub struct TorrentSessionBuilder {
     info_hash: Option<HashId>,
@@ -186,11 +190,11 @@ impl TorrentSessionBuilder {
         let data_dir: PathBuf = self.data_dir.unwrap();
 
         let torrent_path = if let Some(path) = self.torrent_path {
-            let path_link = data_dir.join("main.torrent");
+            let path_link = compute_torrent_path(&data_dir, &info_hash);
             symlink(&path, &path_link).await?;
             path_link
         } else {
-            data_dir.join("main.torrent")
+            compute_torrent_path(&data_dir, &info_hash)
         };
 
         if torrent_path.try_exists()? {
@@ -210,21 +214,6 @@ impl TorrentSessionBuilder {
             )
             .await?;
             aux_storage_manager.assume_checked().await;
-
-            if self.check_files {
-                let paths: Vec<PathBuf> = main_storage_manager
-                    .paths()
-                    .await
-                    .iter()
-                    .map(|p| p.to_path_buf())
-                    .collect();
-                for path in paths {
-                    let pass = main_storage_manager
-                        .check_file(&path, |i| torrent.info.get_piece_sha1(i))
-                        .await?;
-                    debug!(?path, ?pass, "check file");
-                }
-            }
         }
 
         let handshake_template = Self::build_handshake(&my_id, &info_hash);
@@ -249,7 +238,6 @@ impl TorrentSessionBuilder {
             info_hash: Arc::new(info_hash),
             aux_sm: aux_storage_manager,
             handshake_template: Arc::new(handshake_template),
-            torrent: Arc::new(RwLock::new(torrent)),
             peer_conn_req_tx,
             peer_piece_req_tx,
             main_sm: main_storage_manager,
@@ -259,7 +247,7 @@ impl TorrentSessionBuilder {
             short_term_tasks: Default::default(),
             cancel: CancellationToken::new(),
             status: Arc::new(AtomicU32::new(TorrentSessionStatus::Started as u32)),
-            storage_dir: Arc::new(data_dir),
+            data_dir: Arc::new(data_dir),
             lsd: self.lsd.unwrap(),
             dht: self.dht.unwrap(),
             my_id: self.my_id.unwrap(),
@@ -284,8 +272,7 @@ impl TorrentSessionBuilder {
 #[derive(Clone)]
 pub struct TorrentSession {
     pub info_hash: Arc<HashId>,
-    pub torrent: Arc<RwLock<Option<TorrentFile>>>,
-    pub(crate) storage_dir: Arc<PathBuf>,
+    pub(crate) data_dir: Arc<PathBuf>,
 
     peers: Arc<dashmap::DashMap<HashId, Peer>>,
     pub(crate) handshake_template: Arc<BTHandshake>,
@@ -419,8 +406,10 @@ impl TorrentSession {
         }
         {
             if !self.main_sm.checked_bits().await.is_empty() {
-                peer.send_message_now(BTMessage::BitField(self.main_sm.checked_bits().await.to_bytes()))
-                    .await?;
+                peer.send_message_now(BTMessage::BitField(
+                    self.main_sm.checked_bits().await.to_bytes(),
+                ))
+                .await?;
             }
         }
         let mut short_term = self.short_term_tasks.write().await;
@@ -565,12 +554,6 @@ impl TorrentSession {
         let index = data.index;
         let _begin = data.begin;
 
-        let sha1 = {
-            let torrent = self.torrent.read().await;
-            let info = torrent.as_ref().map(|t| &t.info).unwrap();
-            info.get_piece_sha1(index).to_vec()
-        };
-
         let mut all_checked = false;
 
         let complete_piece = {
@@ -581,7 +564,7 @@ impl TorrentSession {
 
         if let Some(piece) = complete_piece {
             self.main_sm.write(piece).await?;
-            let checked = self.main_sm.check(index, &sha1).await?;
+            let checked = self.main_sm.verify_checksum(index).await?;
             all_checked = self.main_sm.all_checked().await;
             if checked {
                 peer.send_message_now(BTMessage::Have(index as u32)).await?;
@@ -612,20 +595,24 @@ impl TorrentSession {
             {
                 debug!(?total_len, "create torrent metadata piece manager");
                 self.aux_sm
-                    .reinit_from_file("/tmp/snail_tmp.torrent", total_len, METADATA_PIECE_SIZE)
+                    .reinit_from_file(
+                        compute_torrent_path(&self.data_dir, &self.info_hash),
+                        total_len,
+                        METADATA_PIECE_SIZE,
+                    )
                     .await?;
             }
         }
 
         let snapshot = self.aux_sm.snapshot().await;
 
-        if self.aux_sm.all_checked().await {
+        if snapshot.all_checked() {
             return Ok(());
         }
 
-        let piece_info = {
+        let piece_reqs = {
             self.aux_am.sync(&snapshot).await?;
-            self.aux_am.request_piece(&peer.peer_id).await
+            self.aux_am.make_piece_request(&peer.peer_id).await
         };
 
         let msg_id = peer
@@ -635,9 +622,9 @@ impl TorrentSession {
             .and_then(|ext| ext.get_msg_id(MSG_UT_METADATA))
             .unwrap();
 
-        for info in piece_info {
-            debug!(?info);
-            let req = UTMetadataMessage::Request(info.index);
+        for req in piece_reqs {
+            debug!(?req);
+            let req = UTMetadataMessage::Request(req.index);
             peer.send_message((msg_id, req)).await?;
         }
         peer.flush().await?;
@@ -647,9 +634,7 @@ impl TorrentSession {
 
     #[instrument(skip_all, fields(peer_id=?peer_id))]
     async fn handle_peer(&self, peer_id: HashId) -> Result<()> {
-        let torrent_exists = { self.torrent.read().await.is_some() };
-
-        if !torrent_exists && self.support_ut_metadata(peer_id) {
+        if self.support_ut_metadata(peer_id) && self.is_missing_torrent_file().await {
             self.handle_req_metadata(peer_id).await?;
             return Ok(());
         }
@@ -658,7 +643,7 @@ impl TorrentSession {
 
         let state = { peer.state.read().await.clone() };
 
-        let pending_piece_info = { self.main_am.request_piece(&peer.peer_id).await };
+        let pending_piece_info = { self.main_am.make_piece_request(&peer.peer_id).await };
 
         if state.choke {
             if !pending_piece_info.is_empty() {
@@ -678,6 +663,11 @@ impl TorrentSession {
         peer.flush().await?;
 
         Ok(())
+    }
+
+    async fn is_missing_torrent_file(&self) -> bool {
+        let size = self.aux_sm.total_size().await;
+        size == 0
     }
 
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]

@@ -1,6 +1,6 @@
 use crate::torrent::HashId;
 use crate::Result;
-use crate::{session::TorrentSession, torrent::TorrentFile};
+use crate::{session::TorrentSession};
 use rand::Rng;
 use std::{
     cmp,
@@ -9,7 +9,6 @@ use std::{
     path::Path,
     time::SystemTime,
 };
-use tracing::{error, warn};
 
 pub fn shuffle_slice<T>(mut slice: &mut [T]) {
     let mut rng = rand::thread_rng();
@@ -120,35 +119,6 @@ mod tests {
     }
 }
 
-fn persistent_torrent_file(session: &TorrentSession, f: &Path) -> Result<()> {
-    if f.exists() {
-        let metadata = f.metadata()?;
-        if metadata.len() > 0 {
-            return Ok(());
-        }
-        warn!(info_hash=?session.info_hash.hex() ,"torrent file is empty, overwrite");
-    }
-
-    let tf = session.torrent.blocking_read();
-
-    if tf.is_none() {
-        warn!("torrent file not found");
-        return Ok(());
-    }
-
-    let torrent = tf.as_ref().unwrap();
-
-    let origin_content = match torrent.get_origin_content() {
-        Some(content) => content,
-        None => return Ok(()),
-    };
-
-    let mut f = std::fs::File::create(f)?;
-    let buf = bencode::to_bytes(origin_content)?;
-    std::io::Write::write_all(&mut f, &buf)?;
-    Ok(())
-}
-
 async fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
     {
         session.main_sm.save_bits().await?;
@@ -160,10 +130,6 @@ async fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
 }
 
 pub(crate) async fn persistent_session_helper(session: &TorrentSession, dir: &Path) -> Result<()> {
-    persistent_torrent_file(
-        &session,
-        &dir.with_file_name(format!("main.torrent",))
-    )?;
     persistent_piece_state(session).await?;
     Ok(())
 }
