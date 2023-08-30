@@ -6,6 +6,7 @@ mod session;
 mod utils;
 mod handler;
 mod session_status;
+mod session_builder;
 
 pub(crate) mod storage;
 pub use peer::{Peer, PeerState};

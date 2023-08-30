@@ -112,7 +112,7 @@ impl Inner {
             maps,
             checked_bits: BitVec::from_elem(piece_num, false),
             // FIXME: use good path
-            checked_bits_path: path.as_ref().join(".snail_checked_bits"),
+            checked_bits_path: path.as_ref().join(".checked_bits"),
             total_size,
             piece_checksum: vec![],
         };
@@ -317,7 +317,12 @@ impl Inner {
     pub async fn read_bit_vec(&self, path: &Path, bit_len: usize) -> Option<BitVec> {
         let data = match fs::read(path) {
             Ok(data) => Ok(data),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(vec![]),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                fs::write(path, vec![]).unwrap();
+                
+                Ok(vec![])
+                
+            },
             Err(e) => Err(Error::Io(e)),
         };
         match data {

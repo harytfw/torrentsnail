@@ -49,7 +49,6 @@ pub struct TorrentSessionBuilder {
     info_hash: Option<HashId>,
     torrent_path: Option<PathBuf>,
     torrent: Option<TorrentFile>,
-    data_dir: Option<PathBuf>,
     check_files: bool,
     dht: Option<DHT>,
     lsd: Option<LSD>,
@@ -108,13 +107,6 @@ impl TorrentSessionBuilder {
     pub fn with_torrent(self, torrent: TorrentFile) -> Self {
         Self {
             torrent: Some(torrent),
-            ..self
-        }
-    }
-
-    pub fn with_data_dir(self, path: impl AsRef<Path>) -> Self {
-        Self {
-            data_dir: Some(path.as_ref().to_path_buf()),
             ..self
         }
     }
@@ -187,7 +179,8 @@ impl TorrentSessionBuilder {
             info_hash = hash;
         }
 
-        let data_dir: PathBuf = self.data_dir.unwrap();
+        let data_dir: PathBuf =
+            PathBuf::from_str(self.config.as_ref().unwrap().data_dir.as_str()).unwrap();
 
         let torrent_path = if let Some(path) = self.torrent_path {
             let path_link = compute_torrent_path(&data_dir, &info_hash);
@@ -274,23 +267,23 @@ pub struct TorrentSession {
     pub info_hash: Arc<HashId>,
     pub(crate) data_dir: Arc<PathBuf>,
 
-    peers: Arc<dashmap::DashMap<HashId, Peer>>,
+    pub(crate) peers: Arc<dashmap::DashMap<HashId, Peer>>,
     pub(crate) handshake_template: Arc<BTHandshake>,
 
-    long_term_tasks: Arc<RwLock<JoinSet<()>>>,
-    short_term_tasks: Arc<RwLock<JoinSet<()>>>,
+    pub(crate) long_term_tasks: Arc<RwLock<JoinSet<()>>>,
+    pub(crate) short_term_tasks: Arc<RwLock<JoinSet<()>>>,
 
-    peer_conn_req_tx: mpsc::Sender<SocketAddr>,
+    pub(crate) peer_conn_req_tx: mpsc::Sender<SocketAddr>,
     pub(crate) peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
-    status: Arc<AtomicU32>,
-    cancel: CancellationToken,
-    my_id: HashId,
-    listen_addr: SocketAddr,
-    tracker: TrackerClient,
-    dht: DHT,
-    lsd: LSD,
-    cfg: Arc<Config>,
-    peer_to_poll_tx: mpsc::Sender<HashId>,
+    pub(crate) status: Arc<AtomicU32>,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) my_id: HashId,
+    pub(crate) listen_addr: SocketAddr,
+    pub(crate) tracker: TrackerClient,
+    pub(crate) dht: DHT,
+    pub(crate) lsd: LSD,
+    pub(crate) cfg: Arc<Config>,
+    pub(crate) peer_to_poll_tx: mpsc::Sender<HashId>,
     pub name: String,
 
     pub(crate) main_sm: StorageManager,
@@ -352,7 +345,7 @@ impl TorrentSession {
         Ok(peer)
     }
 
-    async fn start_tick(
+    pub(crate) async fn start_tick(
         &self,
         peer_addr_rx: mpsc::Receiver<SocketAddr>,
         peer_req_rx: mpsc::Receiver<(Peer, PieceInfo)>,
@@ -980,8 +973,7 @@ impl TorrentSession {
     }
 
     pub async fn persist(&self) -> Result<()> {
-        let path = PathBuf::from_str(&self.cfg.data_dir).unwrap();
-        persistent_session_helper(self, &path).await?;
+        persistent_session_helper(self).await?;
         Ok(())
     }
 

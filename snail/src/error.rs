@@ -62,6 +62,9 @@ pub enum Error {
     Socks5(String),
     #[error("bencode: {0}")]
     Bencode(#[from] bencode::Error),
+
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
