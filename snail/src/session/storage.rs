@@ -222,7 +222,7 @@ impl Inner {
         Ok(b)
     }
 
-    pub async fn check_file<'a>(&mut self, path: impl AsRef<Path>) -> Result<bool> {
+    pub async fn verify_file_checksum<'a>(&mut self, path: impl AsRef<Path>) -> Result<bool> {
         let indices = self
             .maps
             .iter()
@@ -653,9 +653,7 @@ pub mod tests {
 
         let torrent = TorrentFile::from_path(&torrent_path)?;
 
-        let sha1_fn = |index: usize| torrent.info.get_piece_sha1(index);
-
-        let mut pm = StorageManager::from_torrent_data_directory(
+        let pm = StorageManager::from_torrent_data_directory(
             torrent_path.parent().unwrap(),
             &torrent.info,
         )

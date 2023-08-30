@@ -292,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_activity_manager() -> Result<()> {
-        let mut storage_snapshot = StorageSnapshot::new(vec![
+        let storage_snapshot = StorageSnapshot::new(vec![
             PieceSnapshot::new(0, false, 100, bytes::Bytes::from_static(&HashId::ZERO_V1)),
             PieceSnapshot::new(1, false, 100, bytes::Bytes::from_static(&HashId::ZERO_V1)),
             PieceSnapshot::new(2, false, 100, bytes::Bytes::from_static(&HashId::ZERO_V1)),
