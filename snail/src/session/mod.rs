@@ -1,14 +1,18 @@
+mod builder;
 mod file;
+mod handler;
 mod manager;
+mod meta;
 mod peer;
+mod persistence;
 mod piece;
 mod session;
-mod utils;
-mod handler;
 mod session_status;
-mod session_builder;
+mod utils;
+mod constant;
 
 pub(crate) mod storage;
 pub use peer::{Peer, PeerState};
-pub use session::{TorrentSession, TorrentSessionBuilder};
-pub use session_status::TorrentSessionStatus; 
+pub use session::TorrentSession;
+pub use session_status::TorrentSessionStatus;
+pub use builder::TorrentSessionBuilder;

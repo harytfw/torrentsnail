@@ -3,6 +3,7 @@ use crate::dht::DHT;
 use crate::lsd::LSD;
 use crate::magnet::MagnetURI;
 use crate::message::{BTHandshake, MSG_UT_METADATA};
+use crate::session::constant::MAIN_TORRENT_PATH;
 use crate::session::storage::StorageManager;
 use crate::session::TorrentSessionStatus;
 use crate::torrent::TorrentFile;
@@ -20,21 +21,16 @@ use torrent::HashId;
 use tracing::info;
 
 use crate::session::manager::AtomicPieceActivityManager;
-
+use crate::session::meta;
 use crate::session::TorrentSession;
 
 const METADATA_PIECE_SIZE: usize = 16384;
-
-fn compute_torrent_path(data_dir: &Path, info_hash: &HashId) -> PathBuf {
-    data_dir.join(format!("{}.torrent", info_hash.hex()))
-}
 
 #[derive(Default)]
 pub struct TorrentSessionBuilder {
     info_hash: Option<HashId>,
     torrent_path: Option<PathBuf>,
     torrent: Option<TorrentFile>,
-    check_files: bool,
     dht: Option<DHT>,
     lsd: Option<LSD>,
     my_id: Option<HashId>,
@@ -92,13 +88,6 @@ impl TorrentSessionBuilder {
     pub fn with_torrent(self, torrent: TorrentFile) -> Self {
         Self {
             torrent: Some(torrent),
-            ..self
-        }
-    }
-
-    pub fn with_check_files(self, check: bool) -> Self {
-        Self {
-            check_files: check,
             ..self
         }
     }
@@ -164,15 +153,17 @@ impl TorrentSessionBuilder {
             info_hash = hash;
         }
 
-        let data_dir: PathBuf =
-            PathBuf::from_str(self.config.as_ref().unwrap().data_dir.as_str()).unwrap();
+        let session_data_dir: PathBuf =
+            PathBuf::from_str(self.config.as_ref().unwrap().data_dir.as_str())
+                .unwrap()
+                .join(&info_hash.hex());
 
         let torrent_path = if let Some(path) = self.torrent_path {
-            let path_link = compute_torrent_path(&data_dir, &info_hash);
+            let path_link = session_data_dir.join(MAIN_TORRENT_PATH);
             symlink(&path, &path_link).await?;
             path_link
         } else {
-            compute_torrent_path(&data_dir, &info_hash)
+            session_data_dir.join(MAIN_TORRENT_PATH)
         };
 
         if torrent_path.try_exists()? {
@@ -183,7 +174,8 @@ impl TorrentSessionBuilder {
         if let Some(torrent) = torrent.as_ref() {
             info_hash = torrent.info_hash().unwrap();
             main_storage_manager =
-                StorageManager::from_torrent_data_directory(&data_dir, &torrent.info).await?;
+                StorageManager::from_torrent_data_directory(&session_data_dir, &torrent.info)
+                    .await?;
             let metadata_buf = bencode::to_bytes(torrent.get_origin_info().unwrap())?;
             aux_storage_manager = StorageManager::from_single_file(
                 &torrent_path,
@@ -225,7 +217,7 @@ impl TorrentSessionBuilder {
             short_term_tasks: Default::default(),
             cancel: CancellationToken::new(),
             status: Arc::new(AtomicU32::new(TorrentSessionStatus::Started as u32)),
-            data_dir: Arc::new(data_dir),
+            data_dir: Arc::new(session_data_dir),
             lsd: self.lsd.unwrap(),
             dht: self.dht.unwrap(),
             my_id: self.my_id.unwrap(),
@@ -245,7 +237,21 @@ impl TorrentSessionBuilder {
         Ok(ts)
     }
 
-	pub async fn from_data_dir(data_dir: &Path) -> Self {
-		todo!()
-	}
+    pub async fn from_data_dir(session_data_dir: &Path) -> Result<Self> {
+        let file = session_data_dir.join(meta::META_FILE);
+        let session_meta = meta::TorrentSessionMeta::from_json_file(&file)?;
+
+        let info_hash = HashId::from_hex(&session_meta.info_hash)?;
+
+        let mut builder = Self::new()
+            .with_info_hash(info_hash)
+            .with_display_name(&session_meta.name);
+
+        let torrent_path = session_data_dir.join(MAIN_TORRENT_PATH);
+        if torrent_path.try_exists()? {
+            builder = builder.with_torrent_path(torrent_path);
+        }
+
+        Ok(builder)
+    }
 }

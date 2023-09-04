@@ -129,28 +129,3 @@ async fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
     }
     Ok(())
 }
-
-#[derive(Debug, Serialize)]
-struct TorrentSessionMeta {
-    pub(crate) info_hash: String,
-    pub(crate) name: String,
-}
-
-async fn persist_session_meta(session: &TorrentSession) -> Result<()> {
-    let meta = TorrentSessionMeta {
-        info_hash: session.info_hash.to_string(),
-        name: session.name.clone(),
-    };
-
-    let meta_json = serde_json::to_string(&meta)?;
-
-    let meta_path = session.data_dir.join("meta.json");
-    tokio::fs::write(meta_path, meta_json).await?;
-    Ok(())
-}
-
-pub(crate) async fn persistent_session_helper(session: &TorrentSession) -> Result<()> {
-    persistent_piece_state(session).await?;
-    Ok(())
-}
-

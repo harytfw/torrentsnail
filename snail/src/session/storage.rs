@@ -72,7 +72,7 @@ impl Inner {
             last_piece_len,
             maps,
             cache_size: 64 << 20, // 64 MB
-            checked_bits_path: data_dir.as_ref().join(".snail_checked_bits"),
+            checked_bits_path: data_dir.as_ref().join(".checked_bits"),
             total_size: info.total_length(),
             checked_bits: BitVec::from_elem(piece_num, false),
             piece_checksum: torrent_info_to_piece_sha1_checksum(info),
