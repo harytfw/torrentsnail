@@ -88,6 +88,7 @@ pub struct PeerConfig {}
 pub struct Peer {
     msg_tcp_tx: mpsc::Sender<PeerMessage>,
     msg_tx: mpsc::Sender<BTMessage>,
+    msg_rx: Arc<RwLock<mpsc::Receiver<BTMessage>>>,
     cancel: CancellationToken,
     pub state: Arc<RwLock<PeerState>>,
     pub addr: SocketAddr,
@@ -128,11 +129,7 @@ impl std::fmt::Debug for Peer {
 }
 
 impl Peer {
-    pub async fn attach(
-        handshake: BTHandshake,
-        tcp: TcpStream,
-        cfg: PeerConfig,
-    ) -> Result<(Self, mpsc::Receiver<BTMessage>)> {
+    pub async fn attach(handshake: BTHandshake, tcp: TcpStream, cfg: PeerConfig) -> Result<Self> {
         let addr = tcp.peer_addr()?;
         let (tcp_rx, tcp_tx) = tcp.into_split();
 
@@ -143,6 +140,7 @@ impl Peer {
             state: Arc::new(RwLock::new(PeerState::default())),
             msg_tcp_tx,
             msg_tx,
+            msg_rx: Arc::new(RwLock::new(msg_rx)),
             cancel: CancellationToken::new(),
             addr,
             peer_id: handshake.peer_id,
@@ -157,7 +155,7 @@ impl Peer {
             task.spawn(peer.clone().write_tcp(tcp_tx, msg_tcp_rx));
         }
 
-        Ok((peer, msg_rx))
+        Ok(peer)
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -177,6 +175,16 @@ impl Peer {
         self.send_message(msg).await?;
         self.flush().await?;
         Ok(())
+    }
+
+    pub async fn poll_message(&self) -> Result<Option<BTMessage>> {
+        let mut rx = self.msg_rx.write().await;
+
+        match rx.try_recv() {
+            Ok(msg) => Ok(Some(msg)),
+            Err(mpsc::error::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => return Ok(None),
+        }
     }
 
     pub async fn flush(&self) -> Result<()> {

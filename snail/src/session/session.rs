@@ -134,6 +134,7 @@ impl TorrentSession {
         long_term.spawn(self.clone().tick_connect_peer(peer_addr_rx));
         long_term.spawn(self.clone().tick_consume_short_term_task());
         long_term.spawn(self.clone().poll_peer(peer_to_poll_rx));
+        long_term.spawn(self.clone().poll_peers_message());
     }
 
     async fn ext_handshake(
@@ -165,7 +166,7 @@ impl TorrentSession {
     }
 
     async fn on_handshake_done(&self, peer_handshake: BTHandshake, tcp: TcpStream) -> Result<Peer> {
-        let (peer, msg_rx) = Peer::attach(peer_handshake.clone(), tcp, Default::default()).await?;
+        let peer = Peer::attach(peer_handshake.clone(), tcp, Default::default()).await?;
         debug!(peer = ?peer, "attach new peer");
         if !self.peers.contains_key(&peer.peer_id) {
             self.peers.insert(peer.peer_id, peer.clone());
@@ -181,8 +182,6 @@ impl TorrentSession {
                 .await?;
             }
         }
-        let mut short_term = self.short_term_tasks.write().await;
-        short_term.spawn(self.clone().tick_peer_message(peer.clone(), msg_rx));
         Ok(peer)
     }
 
@@ -287,7 +286,9 @@ impl TorrentSession {
     async fn do_announce(&mut self) -> Result<()> {
         debug!("announce lsd");
         self.lsd.announce(&self.info_hash).await?;
-        self.dht.announce(&self.info_hash, *self.listen_addr).await?;
+        self.dht
+            .announce(&self.info_hash, *self.listen_addr)
+            .await?;
         self.search_peer_and_connect().await?;
         Ok(())
     }
@@ -551,17 +552,22 @@ impl TorrentSession {
     }
 
     #[instrument(skip_all,fields(info_hash=?self.info_hash))]
-    async fn tick_peer_message(self, peer: Peer, mut bt_msg_rx: mpsc::Receiver<BTMessage>) {
+    async fn poll_peers_message(self) {
         let t = async {
             loop {
-                match bt_msg_rx.try_recv() {
-                    Ok(msg) => {
-                        self.handle_message(&peer, &msg).await?;
+                for peer in self.peers.iter() {
+                    match peer.poll_message().await {
+                        Ok(Some(msg)) => match self.handle_message(&peer, &msg).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                error!("handle message error: {:?}", e)
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(e) => {
+                            error!("poll message error: {:?}", e);
+                        }
                     }
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        tokio::task::yield_now().await;
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
                 }
             }
         };
