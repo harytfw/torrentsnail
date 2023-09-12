@@ -199,10 +199,12 @@ impl TorrentSessionBuilder {
         let tracker = TrackerClient::new();
 
         let ts = TorrentSession {
-            name: torrent
-                .as_ref()
-                .map(|t| t.info.name.to_string())
-                .unwrap_or_else(|| info_hash.hex()),
+            name: Arc::new(
+                torrent
+                    .as_ref()
+                    .map(|t| t.info.name.to_string())
+                    .unwrap_or_else(|| info_hash.hex()),
+            ),
             tracker,
             peers: Arc::new(dashmap::DashMap::new()),
             info_hash: Arc::new(info_hash),
@@ -220,8 +222,8 @@ impl TorrentSessionBuilder {
             data_dir: Arc::new(session_data_dir),
             lsd: self.lsd.unwrap(),
             dht: self.dht.unwrap(),
-            my_id: self.my_id.unwrap(),
-            listen_addr: self.listen_addr.unwrap(),
+            my_id: Arc::new(self.my_id.unwrap()),
+            listen_addr: Arc::new(self.listen_addr.unwrap()),
             cfg: self.config.unwrap(),
             peer_to_poll_tx,
         };

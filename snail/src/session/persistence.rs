@@ -11,7 +11,7 @@ impl TorrentSession {
     async fn persist_meta(&self) -> Result<()> {
         let meta = meta::TorrentSessionMeta {
             info_hash: self.info_hash.to_string(),
-            name: self.name.clone(),
+            name: self.name.to_string(),
         };
 
         let meta_path = self.data_dir.join(meta::META_FILE);

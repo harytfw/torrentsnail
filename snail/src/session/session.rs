@@ -40,6 +40,9 @@ fn compute_torrent_path(data_dir: &Path, info_hash: &HashId) -> PathBuf {
 #[derive(Clone)]
 pub struct TorrentSession {
     pub info_hash: Arc<HashId>,
+    pub name: Arc<String>,
+    pub my_id: Arc<HashId>,
+
     pub(crate) data_dir: Arc<PathBuf>,
 
     pub(crate) peers: Arc<dashmap::DashMap<HashId, Peer>>,
@@ -52,14 +55,12 @@ pub struct TorrentSession {
     pub(crate) peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
     pub(crate) status: Arc<AtomicU32>,
     pub(crate) cancel: CancellationToken,
-    pub(crate) my_id: HashId,
-    pub(crate) listen_addr: SocketAddr,
+    pub(crate) listen_addr: Arc<SocketAddr>,
     pub(crate) tracker: TrackerClient,
     pub(crate) dht: DHT,
     pub(crate) lsd: LSD,
     pub(crate) cfg: Arc<Config>,
     pub(crate) peer_to_poll_tx: mpsc::Sender<HashId>,
-    pub name: String,
 
     pub(crate) main_sm: StorageManager,
     pub(crate) main_am: PieceActivityManager,
@@ -286,7 +287,7 @@ impl TorrentSession {
     async fn do_announce(&mut self) -> Result<()> {
         debug!("announce lsd");
         self.lsd.announce(&self.info_hash).await?;
-        self.dht.announce(&self.info_hash, self.listen_addr).await?;
+        self.dht.announce(&self.info_hash, *self.listen_addr).await?;
         self.search_peer_and_connect().await?;
         Ok(())
     }
