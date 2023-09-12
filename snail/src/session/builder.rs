@@ -188,13 +188,11 @@ impl TorrentSessionBuilder {
 
         let handshake_template = Self::build_handshake(&my_id, &info_hash);
 
-        let (peer_conn_req_tx, peer_addr_rx) = mpsc::channel(10);
-        let (peer_piece_req_tx, peer_piece_req_rx) = mpsc::channel(50);
-        let (peer_to_poll_tx, peer_to_poll_rx) = mpsc::channel(100);
-
         if info_hash.is_zero() {
             return Err(Error::Generic("no info hash".into()));
         }
+
+        let (action_tx, action_rx) = mpsc::channel(1024);
 
         let tracker = TrackerClient::new();
 
@@ -210,8 +208,6 @@ impl TorrentSessionBuilder {
             info_hash: Arc::new(info_hash),
             aux_sm: aux_storage_manager,
             handshake_template: Arc::new(handshake_template),
-            peer_conn_req_tx,
-            peer_piece_req_tx,
             main_sm: main_storage_manager,
             main_am: PieceActivityManager::new(),
             aux_am: PieceActivityManager::new(),
@@ -225,13 +221,13 @@ impl TorrentSessionBuilder {
             my_id: Arc::new(self.my_id.unwrap()),
             listen_addr: Arc::new(self.listen_addr.unwrap()),
             cfg: self.config.unwrap(),
-            peer_to_poll_tx,
+            action_tx: action_tx,
         };
         {
             let ts_clone = ts.clone();
             tokio::spawn(async move {
                 ts_clone
-                    .start_tick(peer_addr_rx, peer_piece_req_rx, peer_to_poll_rx)
+                    .start_tick(a)
                     .await;
             });
         }

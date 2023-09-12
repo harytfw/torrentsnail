@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::dht::DHT;
 use crate::lsd::LSD;
-use crate::magnet::MagnetURI;
 use crate::message::{
     BTHandshake, BTMessage, LTDontHaveMessage, PieceData, PieceInfo, UTMetadataMessage,
     MSG_LT_DONTHAVE, MSG_UT_METADATA,
@@ -10,8 +9,8 @@ use crate::proxy::socks5::Socks5Client;
 use crate::session::manager::PieceActivityManager;
 use crate::session::peer::Peer;
 use crate::session::storage::StorageManager;
-use crate::session::utils::make_announce_key;
 use crate::session::TorrentSessionStatus;
+use crate::tracker::types::AnnounceResponse;
 use crate::tracker::TrackerClient;
 use crate::{torrent, tracker, Error, Result};
 use num::FromPrimitive;
@@ -29,6 +28,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use torrent::HashId;
 use tracing::{debug, error, info, instrument};
+
+use super::action::SessionAction;
 
 const METADATA_PIECE_SIZE: usize = 16384;
 
@@ -51,8 +52,6 @@ pub struct TorrentSession {
     pub(crate) long_term_tasks: Arc<RwLock<JoinSet<()>>>,
     pub(crate) short_term_tasks: Arc<RwLock<JoinSet<()>>>,
 
-    pub(crate) peer_conn_req_tx: mpsc::Sender<SocketAddr>,
-    pub(crate) peer_piece_req_tx: mpsc::Sender<(Peer, PieceInfo)>,
     pub(crate) status: Arc<AtomicU32>,
     pub(crate) cancel: CancellationToken,
     pub(crate) listen_addr: Arc<SocketAddr>,
@@ -60,12 +59,12 @@ pub struct TorrentSession {
     pub(crate) dht: DHT,
     pub(crate) lsd: LSD,
     pub(crate) cfg: Arc<Config>,
-    pub(crate) peer_to_poll_tx: mpsc::Sender<HashId>,
 
     pub(crate) main_sm: StorageManager,
     pub(crate) main_am: PieceActivityManager,
     pub(crate) aux_sm: StorageManager,
     pub(crate) aux_am: PieceActivityManager,
+    pub(crate) action_tx: mpsc::Sender<SessionAction>,
 }
 
 impl Debug for TorrentSession {
@@ -121,19 +120,11 @@ impl TorrentSession {
         Ok(peer)
     }
 
-    pub(crate) async fn start_tick(
-        &self,
-        peer_addr_rx: mpsc::Receiver<SocketAddr>,
-        peer_req_rx: mpsc::Receiver<(Peer, PieceInfo)>,
-        peer_to_poll_rx: mpsc::Receiver<HashId>,
-    ) {
+    pub(crate) async fn start_tick(&self, actin_rx: mpsc::Receiver<SessionAction>) {
         let mut long_term = self.long_term_tasks.write().await;
         long_term.spawn(self.clone().tick_announce());
         long_term.spawn(self.clone().tick_check_peer());
-        long_term.spawn(self.clone().tick_peer_req(peer_req_rx));
-        long_term.spawn(self.clone().tick_connect_peer(peer_addr_rx));
         long_term.spawn(self.clone().tick_consume_short_term_task());
-        long_term.spawn(self.clone().poll_peer(peer_to_poll_rx));
         long_term.spawn(self.clone().poll_peers_message());
     }
 
@@ -187,54 +178,10 @@ impl TorrentSession {
 
     #[instrument(skip_all)]
     async fn announce_tracker_event(&self, event: tracker::Event) -> Result<()> {
-        let mut short_term = self.short_term_tasks.write().await;
-        short_term.spawn(self.clone().announce_tracker_event_inner(event));
-        Ok(())
-    }
-
-    async fn announce_tracker_event_inner(self, event: tracker::Event) {
-        let t = async {
-            let mut req = tracker::AnnounceRequest::new();
-            req.set_key(make_announce_key(&self.my_id, &self.info_hash))
-                .set_ip_address(&self.listen_addr)
-                .set_info_hash(&self.info_hash)
-                .set_peer_id(&self.my_id)
-                .set_num_want(10)
-                .set_event(event);
-            debug!(req = ?req, "announce tracker");
-            let mut rx = self.tracker.send_announce(&req).await;
-            loop {
-                match rx.try_recv() {
-                    Ok(result) => match result {
-                        Ok((url, rsp)) => {
-                            for peer in rsp.peers() {
-                                debug!(peer = ?peer, url = ?url, "new peer from tracker");
-                                self.dht.send_get_peers(&peer, &self.info_hash).await?;
-
-                                self.peer_conn_req_tx.send(peer).await?;
-                            }
-                            // TODO:
-                        }
-                        Err(err) => {
-                            // TODO: ignore skip announce
-                            error!(?err, "tracker send announce");
-                        }
-                    },
-                    Err(mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
-
-                    Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
-                }
-            }
-        };
-        tokio::select! {
-            r = t => {
-                let r : Result<(),Error> = r;
-                if let Err(err) = r {
-                    error!(?err, "announce tracker event")
-                }
-            },
-            _ = self.cancel.cancelled() => {}
-        }
+        self.action_tx
+            .send(SessionAction::AnnounceTracker(event))
+            .await?;
+        return Ok(());
     }
 
     async fn connect_peer_addr(&mut self, addr: SocketAddr) -> Result<()> {
@@ -307,6 +254,39 @@ impl TorrentSession {
         tokio::select! {
             r = t => {
                 let r: Result<()> = r;
+                match r {
+                    Ok(()) => {}
+                    Err(e) => error!(err = ?e, "tick announce")
+                }
+            },
+            _ = cancel.cancelled() => {}
+        }
+    }
+
+    #[instrument(skip_all, fields(info_hash=?self.info_hash))]
+    async fn chain_announce_response_to_action(
+        self,
+        mut announce_response_rx: mpsc::Receiver<AnnounceResponse>,
+    ) {
+        let cancel = self.cancel.clone();
+
+        let t = async {
+            loop {
+                match announce_response_rx.recv().await {
+                    Some(rsp) => {
+                        self.action_tx.send(SessionAction::from(rsp)).await.unwrap();
+                    }
+                    None => {
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+
+        tokio::select! {
+            r = t => {
+                let r: Result<()> = Ok(r);
                 match r {
                     Ok(()) => {}
                     Err(e) => error!(err = ?e, "tick announce")

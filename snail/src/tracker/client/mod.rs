@@ -5,10 +5,10 @@ pub use super::types;
 use super::types::AnnounceRequest;
 use crate::Result;
 pub use http::TrackerHttpClient;
-use std::{time::Instant};
+use std::time::Instant;
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::mpsc};
-use tracing::{error};
+use tokio::sync::mpsc;
+use tracing::error;
 pub use udp::TrackerUdpClient;
 
 #[derive(Debug, Clone, Default)]
@@ -129,23 +129,22 @@ impl TrackerClient {
     pub async fn send_announce(
         &self,
         req: &AnnounceRequest,
-    ) -> mpsc::Receiver<Result<(String, AnnounceResponse)>> {
-        let (tx, rx) = mpsc::channel(20);
+        result_tx: mpsc::Sender<Result<(String, AnnounceResponse)>>,
+    ) {
         let req = Arc::new(req.clone());
         for session in self.sessions().await {
             let req_arc = Arc::clone(&req);
-            let tx_clone = tx.clone();
             let url = session.tracker_url().to_string();
+            let result_tx_cloned = result_tx.clone();
             tokio::spawn(async move {
                 let r = session.send_announce(&req_arc).await;
                 let r = r.map(|rsp| (url, rsp));
-                match tx_clone.send(r).await {
+                match result_tx_cloned.send(r).await {
                     Ok(()) => {}
                     Err(e) => error!(err=?e),
                 }
             });
         }
-        rx
     }
 
     pub async fn get_session(&self, url: &str) -> Option<Session> {

@@ -9,6 +9,8 @@ use crate::{
 };
 use tracing::{debug, instrument, warn};
 
+use super::action::SessionAction;
+
 impl TorrentSession {
     #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
     pub(crate) async fn handle_message(&self, peer: &Peer, msg: &BTMessage) -> Result<()> {
@@ -30,9 +32,7 @@ impl TorrentSession {
                 state.interested = false
             }
             BTMessage::Request(info) => {
-                self.peer_piece_req_tx
-                    .send((peer.clone(), info.clone()))
-                    .await?;
+                self.action_tx.send(SessionAction::OnPeerRequest((peer.peer_id, info.clone()))).await?;
             }
             BTMessage::Piece(data) => {
                 self.on_piece_arrived(peer, data).await?;
