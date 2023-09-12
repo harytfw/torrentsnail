@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use torrent::HashId;
 use tracing::info;
 
-use crate::session::manager::AtomicPieceActivityManager;
+use crate::session::manager::PieceActivityManager;
 use crate::session::meta;
 use crate::session::TorrentSession;
 
@@ -211,8 +211,8 @@ impl TorrentSessionBuilder {
             peer_conn_req_tx,
             peer_piece_req_tx,
             main_sm: main_storage_manager,
-            main_am: AtomicPieceActivityManager::new(),
-            aux_am: AtomicPieceActivityManager::new(),
+            main_am: PieceActivityManager::new(),
+            aux_am: PieceActivityManager::new(),
             long_term_tasks: Default::default(),
             short_term_tasks: Default::default(),
             cancel: CancellationToken::new(),

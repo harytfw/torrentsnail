@@ -319,10 +319,9 @@ impl Inner {
             Ok(data) => Ok(data),
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 fs::write(path, vec![]).unwrap();
-                
+
                 Ok(vec![])
-                
-            },
+            }
             Err(e) => Err(Error::Io(e)),
         };
         match data {
@@ -415,6 +414,10 @@ impl StorageSnapshot {
 pub struct StorageManager {
     inner: Arc<RwLock<Inner>>,
 }
+
+unsafe impl Send for StorageManager {}
+
+unsafe impl Sync for StorageManager {}
 
 impl StorageManager {
     pub async fn from_torrent_data_directory(

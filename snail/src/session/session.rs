@@ -7,7 +7,7 @@ use crate::message::{
     MSG_LT_DONTHAVE, MSG_UT_METADATA,
 };
 use crate::proxy::socks5::Socks5Client;
-use crate::session::manager::AtomicPieceActivityManager;
+use crate::session::manager::PieceActivityManager;
 use crate::session::peer::Peer;
 use crate::session::storage::StorageManager;
 use crate::session::utils::make_announce_key;
@@ -62,9 +62,9 @@ pub struct TorrentSession {
     pub name: String,
 
     pub(crate) main_sm: StorageManager,
-    pub(crate) main_am: AtomicPieceActivityManager,
+    pub(crate) main_am: PieceActivityManager,
     pub(crate) aux_sm: StorageManager,
-    pub(crate) aux_am: AtomicPieceActivityManager,
+    pub(crate) aux_am: PieceActivityManager,
 }
 
 impl Debug for TorrentSession {

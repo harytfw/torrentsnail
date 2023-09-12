@@ -50,7 +50,7 @@ impl PieceActivityState {
 
 const ADAPTIVE_BYTES_STEP: f64 = (128 << 10) as f64;
 
-pub struct PieceActivityManager {
+struct InnerPieceActivityManager {
     max_req: usize,
     piece_state: HashMap<usize, PieceActivityState>,
     all_checked: bool,
@@ -59,7 +59,7 @@ pub struct PieceActivityManager {
     peer_owned_pieces: HashMap<HashId, BitVec>,
 }
 
-impl PieceActivityManager {
+impl InnerPieceActivityManager {
     pub fn new() -> Self {
         Self {
             max_req: 100,
@@ -233,14 +233,17 @@ impl PieceActivityManager {
 }
 
 #[derive(Clone)]
-pub struct AtomicPieceActivityManager {
-    inner: Arc<RwLock<PieceActivityManager>>,
+pub struct PieceActivityManager {
+    inner: Arc<RwLock<InnerPieceActivityManager>>,
 }
 
-impl AtomicPieceActivityManager {
+unsafe impl Send for PieceActivityManager {}
+unsafe impl Sync for PieceActivityManager {}
+
+impl PieceActivityManager {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(PieceActivityManager::new())),
+            inner: Arc::new(RwLock::new(InnerPieceActivityManager::new())),
         }
     }
 
@@ -300,7 +303,7 @@ mod tests {
 
         let peer_id = HashId::ZERO_V1;
 
-        let mut plm = PieceActivityManager::new();
+        let mut plm = InnerPieceActivityManager::new();
         plm.clear();
 
         plm.sync_snapshot(&storage_snapshot)?;

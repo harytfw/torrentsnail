@@ -1,7 +1,6 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::session::meta;
 use crate::session::TorrentSession;
-use serde::Serialize;
 
 impl TorrentSession {
     pub async fn persist(&self) -> Result<()> {
@@ -15,10 +14,8 @@ impl TorrentSession {
             name: self.name.clone(),
         };
 
-        let meta_json = serde_json::to_string(&meta)?;
-
         let meta_path = self.data_dir.join(meta::META_FILE);
-        tokio::fs::write(meta_path, meta_json).await?;
+        meta.write_as_json_file(&meta_path)?;
         Ok(())
     }
 }
