@@ -183,7 +183,7 @@ impl Peer {
         match rx.try_recv() {
             Ok(msg) => Ok(Some(msg)),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::error::TryRecvError::Disconnected) => return Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => Ok(None),
         }
     }
 

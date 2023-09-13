@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::message::PieceData;
 use crate::{
     message::{
         BTExtMessage, BTMessage, LTDontHaveMessage, UTMetadataMessage, UTMetadataPieceData,
@@ -7,9 +7,10 @@ use crate::{
     session::{Peer, TorrentSession},
     torrent::{HashId, TorrentInfo},
 };
+use crate::{Error, Result};
 use tracing::{debug, instrument, warn};
 
-use super::action::SessionAction;
+use crate::session::types::SessionEvent;
 
 impl TorrentSession {
     #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
@@ -32,7 +33,12 @@ impl TorrentSession {
                 state.interested = false
             }
             BTMessage::Request(info) => {
-                self.action_tx.send(SessionAction::OnPeerRequest((peer.peer_id, info.clone()))).await?;
+                self.event_tx
+                    .send(SessionEvent::OnPeerRequest(Box::new((
+                        peer.peer_id,
+                        info.clone(),
+                    ))))
+                    .await?;
             }
             BTMessage::Piece(data) => {
                 self.on_piece_arrived(peer, data).await?;
@@ -201,6 +207,39 @@ impl TorrentSession {
                 let snapshot = self.main_sm.snapshot().await;
                 self.main_am.sync(&snapshot).await?;
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn on_piece_arrived(
+        &self,
+        peer: &Peer,
+        data: &PieceData,
+    ) -> Result<(), Error> {
+        let index = data.index;
+        let _begin = data.begin;
+
+        let mut all_checked = false;
+
+        let complete_piece = {
+            self.main_am
+                .on_piece_data(data.index, data.begin, &data.fragment, &peer.peer_id)
+                .await
+        };
+
+        if let Some(piece) = complete_piece {
+            self.main_sm.write(piece).await?;
+            let checked = self.main_sm.verify_checksum(index).await?;
+            all_checked = self.main_sm.all_checked().await;
+            if checked {
+                peer.send_message_now(BTMessage::Have(index as u32)).await?;
+            }
+            if all_checked {
+                self.main_sm.flush().await?;
+            }
+        }
+        if all_checked {
+            self.stop().await?;
         }
         Ok(())
     }

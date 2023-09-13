@@ -212,7 +212,6 @@ impl TorrentSessionBuilder {
             main_am: PieceActivityManager::new(),
             aux_am: PieceActivityManager::new(),
             long_term_tasks: Default::default(),
-            short_term_tasks: Default::default(),
             cancel: CancellationToken::new(),
             status: Arc::new(AtomicU32::new(TorrentSessionStatus::Started as u32)),
             data_dir: Arc::new(session_data_dir),
@@ -221,13 +220,13 @@ impl TorrentSessionBuilder {
             my_id: Arc::new(self.my_id.unwrap()),
             listen_addr: Arc::new(self.listen_addr.unwrap()),
             cfg: self.config.unwrap(),
-            action_tx: action_tx,
+            event_tx: action_tx,
         };
         {
             let ts_clone = ts.clone();
             tokio::spawn(async move {
                 ts_clone
-                    .start_tick(a)
+                    .start_tick(action_rx)
                     .await;
             });
         }

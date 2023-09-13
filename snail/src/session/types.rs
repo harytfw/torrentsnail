@@ -6,16 +6,17 @@ use crate::{
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
-pub enum SessionAction {
-    AnnounceTracker(tracker::Event),
-    OnAnnounceResponse(Box<AnnounceResponse>),
+pub enum SessionEvent {
+    AnnounceTrackerRequest(tracker::Event),
+    AnnounceTrackerResponse(Box<AnnounceResponse>),
     ConnectPeer(Box<SocketAddr>),
+    CheckPeer,
     PollPeer(Box<HashId>),
     OnPeerRequest(Box<(HashId, PieceInfo)>),
 }
 
-impl From<AnnounceResponse> for SessionAction {
+impl From<AnnounceResponse> for SessionEvent {
     fn from(resp: AnnounceResponse) -> Self {
-        Self::OnAnnounceResponse(Box::new(resp))
+        Self::AnnounceTrackerResponse(Box::new(resp))
     }
 }

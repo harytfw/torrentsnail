@@ -81,13 +81,13 @@ impl Socks5Client {
         Self { addr }
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> Result<tokio::net::TcpStream> {
+    pub async fn connect(&self, addr: &SocketAddr) -> Result<tokio::net::TcpStream> {
         let mut stream = tokio::net::TcpStream::connect(self.addr).await?;
         self.handshake(&mut stream).await?;
 
         {
             let mut connect_command = vec![0x05, 0x01, 0x00];
-            connect_command.extend(Socks5Addr::from(addr).to_bytes());
+            connect_command.extend(Socks5Addr::from(*addr).to_bytes());
             connect_command.extend(&addr.port().to_be_bytes());
             // connect
             stream.write_all(&connect_command).await?;
@@ -150,7 +150,7 @@ mod tests {
         let mut server_addr = "127.0.0.1:7890".to_socket_addrs().unwrap();
         let client = Socks5Client::new(server_addr.next().unwrap());
         let mut to = "example.com:80".to_socket_addrs().unwrap();
-        let mut stream = client.connect(to.next().unwrap()).await?;
+        let mut stream = client.connect(&to.next().unwrap()).await?;
         stream
             .write_all(
                 "GET / HTTP/1.0\nHost: example.com\nAccept-Language: en-US\nConnection: close\n\n".as_bytes(),

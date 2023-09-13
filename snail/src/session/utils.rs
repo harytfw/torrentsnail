@@ -7,7 +7,7 @@ use std::{
     cmp,
     collections::{hash_map::DefaultHasher, BTreeMap},
     hash::{Hash, Hasher},
-    path::Path,
+    path::{Path, PathBuf},
     time::SystemTime,
 };
 
@@ -129,3 +129,12 @@ async fn persistent_piece_state(session: &TorrentSession) -> Result<()> {
     }
     Ok(())
 }
+
+
+pub fn compute_torrent_path(data_dir: &Path, info_hash: &HashId) -> PathBuf {
+    data_dir.join(format!("{}.torrent", info_hash.hex()))
+}
+
+
+pub const METADATA_PIECE_SIZE: usize = 16384;
+
