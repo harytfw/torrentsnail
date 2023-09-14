@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use tracing::{debug, instrument};
+use tracing::{debug, error, info, instrument};
 
-use crate::message::{UTMetadataMessage, MSG_UT_METADATA};
+use crate::message::{PieceInfo, UTMetadataMessage, MSG_UT_METADATA};
 use crate::session::types::SessionEvent;
 use crate::session::utils::{compute_torrent_path, METADATA_PIECE_SIZE};
 use crate::{message::BTMessage, torrent::HashId};
 use crate::{Error, Result};
 
-use crate::session::TorrentSession;
+use crate::session::{Peer, TorrentSession};
 
 impl TorrentSession {
     fn support_ut_metadata(&self, peer_id: &HashId) -> bool {
@@ -97,9 +97,18 @@ impl TorrentSession {
         // FIXME: handle not found
         let peer = self.peers.iter().find(|p| &p.peer_id == peer_id).unwrap();
 
+        if !self.check_peer_state(&peer).await {
+            return Ok(());
+        }
+
         let state = { peer.state.read().await.clone() };
 
-        let pending_piece_info = { self.main_am.make_piece_request(&peer.peer_id).await };
+        self.main_am
+            .sync_peer_pieces(&peer.peer_id, &state.owned_pieces)
+            .await
+            .unwrap();
+
+        let pending_piece_info = self.main_am.make_piece_request(&peer.peer_id).await;
 
         if state.choke {
             if !pending_piece_info.is_empty() {
@@ -119,6 +128,35 @@ impl TorrentSession {
         peer.flush().await?;
 
         Ok(())
+    }
+
+    pub async fn check_peer_state(&self, peer: &Peer) -> bool {
+        let mut is_broken = false;
+
+        if let Some(broken_reason) = peer.state.read().await.broken.as_ref() {
+            info!(?broken_reason, ?peer.peer_id, "peer broken");
+            peer.shutdown().await.unwrap();
+            is_broken = true;
+        }
+
+        match peer.poll_message().await {
+            Ok(Some(msg)) => match self.handle_bt_message(&peer, &msg).await {
+                Ok(()) => {}
+                Err(e) => {
+                    error!("handle message error: {:?}", e)
+                }
+            },
+            Ok(None) => {}
+            Err(e) => {
+                error!("poll message error: {:?}", e);
+            }
+        }
+
+        if is_broken {
+            self.peers.remove(&peer.peer_id);
+            return false;
+        }
+        return true;
     }
 
     pub async fn search_peer_and_connect(&mut self) -> Result<()> {

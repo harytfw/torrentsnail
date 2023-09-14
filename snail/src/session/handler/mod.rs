@@ -54,40 +54,9 @@ impl TorrentSession {
 
     async fn on_event_poll_peer(&self, peer_id: &HashId) {
         debug!(?peer_id, "poll peer");
-        if let Some(peer) = self.peers.get(&peer_id) {
-            let state = peer.state.read().await;
-            self.main_am
-                .sync_peer_pieces(&peer.peer_id, &state.owned_pieces)
-                .await
-                .unwrap();
-        }
+
         self.handle_peer(peer_id).await.unwrap();
 
-        let mut is_broken = false;
-
-        if let Some(peer) = self.peers.get(&peer_id) {
-            if let Some(broken_reason) = peer.state.read().await.broken.as_ref() {
-                info!(?broken_reason, ?peer_id, "peer broken");
-                peer.shutdown().await;
-                is_broken = true;
-            }
-
-            match peer.poll_message().await {
-                Ok(Some(msg)) => match self.handle_message(&peer, &msg).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        error!("handle message error: {:?}", e)
-                    }
-                },
-                Ok(None) => {}
-                Err(e) => {
-                    error!("poll message error: {:?}", e);
-                }
-            }
-        }
-        if is_broken {
-            self.peers.remove(&peer_id);
-        }
     }
 
     async fn on_event_announce_tracker_request(&self, event: tracker::Event) {
@@ -165,5 +134,6 @@ impl TorrentSession {
                 error!(err = ?e, "connect peer");
             }
         };
+
     }
 }

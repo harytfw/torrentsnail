@@ -14,7 +14,7 @@ use crate::session::types::SessionEvent;
 
 impl TorrentSession {
     #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
-    pub(crate) async fn handle_message(&self, peer: &Peer, msg: &BTMessage) -> Result<()> {
+    pub(crate) async fn handle_bt_message(&self, peer: &Peer, msg: &BTMessage) -> Result<()> {
         match msg {
             BTMessage::Choke => {
                 let mut state = peer.state.write().await;
