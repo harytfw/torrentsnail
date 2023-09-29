@@ -937,7 +937,6 @@ impl_serde!(
 #[cfg(test)]
 mod test {
     use super::*;
-    
 
     #[test]
     fn test_connect_request() -> Result<()> {
@@ -1055,5 +1054,4 @@ mod test {
         let q = AnnounceRequest::new();
         assert!(!q.to_query_string().is_empty());
     }
-
 }

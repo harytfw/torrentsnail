@@ -34,6 +34,12 @@ impl Serialize for HexHashId {
     }
 }
 
+impl std::fmt::Display for HexHashId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.hex())
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct PeerInfo {
     peer_id: HexHashId,
@@ -56,17 +62,21 @@ pub struct TrackerInfo {
 
 #[derive(Serialize, Debug)]
 pub struct TorrentSessionModel {
-    name: String,
-    info_hash: HexHashId,
-    torrent: (),
-    peers: Vec<PeerInfo>,
-    status: TorrentSessionStatus,
+    pub(crate) name: String,
+    pub(crate) info_hash: HexHashId,
+    pub(crate) torrent: (),
+    pub(crate) peers: Vec<PeerInfo>,
+    pub(crate) status: TorrentSessionStatus,
+    pub(crate) size: u64,
+    pub(crate) progress: u64,
+    pub(crate) seeders: u64,
+    pub(crate) files: String,
 }
 
 impl TorrentSessionModel {
     pub fn from_session(session: &TorrentSession) -> Self {
         Self {
-            name: session.name.clone(),
+            name: session.name.to_string(),
             info_hash: HexHashId(*session.info_hash),
             peers: session
                 .peers()
@@ -78,6 +88,10 @@ impl TorrentSessionModel {
                 .collect(),
             status: session.status(),
             torrent: (),
+            size: 0,
+            progress: 0,
+            seeders: 0,
+            files: "".to_string(),
         }
     }
 }
@@ -170,8 +184,10 @@ where
     value: T,
 }
 
-
-impl<T> OkResponse<T> where T: Debug + Serialize{
+impl<T> OkResponse<T>
+where
+    T: Debug + Serialize,
+{
     pub fn new(value: T) -> Self {
         Self { value }
     }

@@ -1,9 +1,11 @@
+mod app;
+mod model;
+
+use anyhow::Result;
+use app::Application;
 use clap::Parser;
 use snail::config::Config;
 use tokio::signal;
-mod app;
-use anyhow::Result;
-use app::Application;
 use tracing::log::info;
 
 /// Simple program to greet a person
@@ -17,13 +19,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_file(true)
         .with_line_number(true)
         .init();
-    
+
     let args = Args::parse();
 
     let cfg = if let Some(config_path) = args.config {
@@ -31,7 +32,6 @@ async fn main() -> Result<()> {
     } else {
         Config::default()
     };
-
 
     let app = Application::from_config(cfg).await.unwrap();
 

@@ -23,7 +23,7 @@ impl TorrentSession {
     ) -> Result<Peer> {
         tcp.write_all(&self.handshake_template.to_bytes()).await?;
 
-        if peer_handshake.extension.get_ext_handshake() {
+        if peer_handshake.extension.support_ext_handshake() {
             return self.ext_handshake(peer_handshake, tcp).await;
         }
 
@@ -43,8 +43,8 @@ impl TorrentSession {
             ));
         }
 
-        if self.handshake_template.extension.get_ext_handshake()
-            && peer_handshake.extension.get_ext_handshake()
+        if self.handshake_template.extension.support_ext_handshake()
+            && peer_handshake.extension.support_ext_handshake()
         {
             return self.ext_handshake(peer_handshake, tcp).await;
         }

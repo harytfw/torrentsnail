@@ -12,7 +12,6 @@ pub mod ratelimiter;
 pub mod session;
 
 pub mod config;
-pub mod db;
 pub mod utils;
 
 pub const SNAIL_VERSION: &str = "TorrentSnail 0.0.1";

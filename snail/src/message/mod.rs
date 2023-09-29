@@ -93,7 +93,7 @@ impl std::ops::DerefMut for BTExtension {
 impl Debug for BTExtension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map()
-            .entry(&"ext_handshake", &self.get_ext_handshake())
+            .entry(&"ext_handshake", &self.support_ext_handshake())
             .finish()
     }
 }
@@ -112,7 +112,7 @@ impl BTExtension {
         self
     }
 
-    pub fn get_ext_handshake(&self) -> bool {
+    pub fn support_ext_handshake(&self) -> bool {
         self.0[5] & (1 << 4) != 0
     }
 }
@@ -618,10 +618,10 @@ mod tests {
     #[test]
     fn extension() {
         let mut ext = BTExtension::new();
-        assert!(!ext.get_ext_handshake());
+        assert!(!ext.support_ext_handshake());
         ext.set_ext_handshake(true);
-        assert!(ext.get_ext_handshake());
+        assert!(ext.support_ext_handshake());
         ext.set_ext_handshake(false);
-        assert!(!ext.get_ext_handshake());
+        assert!(!ext.support_ext_handshake());
     }
 }

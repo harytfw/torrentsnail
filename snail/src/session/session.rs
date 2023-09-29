@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use torrent::HashId;
 use tracing::{debug, error, instrument};
 
-use super::types::SessionEvent;
+use super::event::SessionEvent;
 
 // TODO: reduce struct size
 #[derive(Clone)]

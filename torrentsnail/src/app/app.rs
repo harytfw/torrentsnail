@@ -25,6 +25,7 @@ pub struct Application {
     sessions: Arc<DashMap<HashId, TorrentSession>>,
     pub(crate) cancel: CancellationToken,
     pub(crate) config: Arc<Config>,
+    pub ui_url_prefix: String,
 }
 
 impl Application {
@@ -73,6 +74,7 @@ impl Application {
             cancel: CancellationToken::new(),
             listen_addr: Arc::clone(&listen_addr),
             config: Arc::clone(&config),
+            ui_url_prefix: "/ui".to_string(),
         });
         {
             debug!(?listen_addr, "setup tcp listener");
@@ -186,7 +188,10 @@ impl Application {
         self.sessions.clone()
     }
 
-    pub fn get_session_by_info_hash(self: &Arc<Self>, info_hash: &HashId) -> Option<TorrentSession> {
+    pub fn get_session_by_info_hash(
+        self: &Arc<Self>,
+        info_hash: &HashId,
+    ) -> Option<TorrentSession> {
         debug!(?info_hash, len = ?self.sessions.len(), "get session by info hash");
         self.sessions.get(info_hash).map(|s| s.clone())
     }

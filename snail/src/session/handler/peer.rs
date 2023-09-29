@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use tracing::{debug, error, info, instrument};
 
 use crate::message::{PieceInfo, UTMetadataMessage, MSG_UT_METADATA};
-use crate::session::types::SessionEvent;
+use crate::session::event::SessionEvent;
 use crate::session::utils::{compute_torrent_path, METADATA_PIECE_SIZE};
 use crate::{message::BTMessage, torrent::HashId};
 use crate::{Error, Result};

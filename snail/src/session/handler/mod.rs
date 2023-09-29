@@ -4,7 +4,7 @@ use crate::session::utils::make_announce_key;
 use crate::torrent::HashId;
 use crate::tracker::types::AnnounceResponse;
 use crate::{
-    session::{types::SessionEvent, TorrentSession},
+    session::{event::SessionEvent, TorrentSession},
     tracker,
 };
 use std::net::SocketAddr;
@@ -56,7 +56,6 @@ impl TorrentSession {
         debug!(?peer_id, "poll peer");
 
         self.handle_peer(peer_id).await.unwrap();
-
     }
 
     async fn on_event_announce_tracker_request(&self, event: tracker::Event) {
@@ -134,6 +133,5 @@ impl TorrentSession {
                 error!(err = ?e, "connect peer");
             }
         };
-
     }
 }

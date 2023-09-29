@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Index</title>
+</head>
+
+<body>
+	<div>
+		<h2>
+			Add Magnet Link
+		</h2>
+		<form action="/ui/action/add-magnet-link" method="post">
+			<div>
+				<label for="magnet-link">Magnet Link</label>
+				<input name="magnet-link" id="magnet-link" value="" />
+			</div>
+			<div>
+				<button>Confirm</button>
+			</div>
+		</form>
+	</div>
+	<div>
+		<table>
+			<th>
+			<td>
+				Torrent Name
+			</td>
+			<td>
+				Size
+			</td>
+			<td>
+				Progress
+			</td>
+			<td>
+				Status
+			</td>
+			<td>
+				Seeders
+			</td>
+			<td>
+				Files
+			</td>
+			<td>
+				Actions
+			</td>
+			</th>
+			{% for session in sessions %}
+			<tr>
+				<td>
+					{{ session.name }}
+				</td>
+				<td>
+					{{ session.size }}
+				</td>
+				<td>
+					{{ session.progress }}
+				</td>
+				<td>
+					{{ session.status }}
+				</td>
+				<td>
+					{{ session.seeders }}
+				</td>
+				<td>
+					{{ session.files }}
+				</td>
+				<td>
+					<form action="/ui/action/pause-session?info_hash={{ session.info_hash }}">
+						<button>Pause</button>
+					</form>
+					<form action="/ui/action/resume-session?info_hash={{ session.info_hash }}">
+						<button>Resume</button>
+					</form>
+					<form action="/ui/action/remove-session?info_hash={{ session.info_hash }}">
+						<button>Remove</button>
+					</form>
+				</td>
+			</tr>
+			{% endfor %}
+		</table>
+	</div>
+</body>
+
+</html>

@@ -10,7 +10,7 @@ use crate::{
 use crate::{Error, Result};
 use tracing::{debug, instrument, warn};
 
-use crate::session::types::SessionEvent;
+use crate::session::event::SessionEvent;
 
 impl TorrentSession {
     #[instrument(skip_all, fields(peer_id=?peer.peer_id))]
