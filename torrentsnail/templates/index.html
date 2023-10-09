@@ -14,8 +14,22 @@
 		</h2>
 		<form action="/ui/action/add-magnet-link" method="post">
 			<div>
-				<label for="magnet-link">Magnet Link</label>
-				<input name="magnet-link" id="magnet-link" value="" />
+				<label for="magnet_link">Magnet Link</label>
+				<input name="magnet_link" id="magnet_link" value="" />
+			</div>
+			<div>
+				<button>Confirm</button>
+			</div>
+		</form>
+	</div>
+	<div>
+		<h2>
+			Add Peer
+		</h2>
+		<form action="/ui/action/add-peer-address" method="post">
+			<div>
+				<label for="peer_address">Peer Address</label>
+				<input name="peer_address" id="peer_address" value="" />
 			</div>
 			<div>
 				<button>Confirm</button>
@@ -63,6 +77,9 @@
 				</td>
 				<td>
 					{{ session.seeders }}
+				</td>
+				<td>
+					{{ session.files }}
 				</td>
 				<td>
 					{{ session.files }}

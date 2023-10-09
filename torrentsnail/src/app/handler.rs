@@ -50,6 +50,7 @@ pub async fn start_server(app: Arc<Application>) {
                 Router::new()
                     .route("/add-magnet-link", post(ui::handler::add_magnet_link))
                     .route("/add-torrent-file", post(ui::handler::add_torrent_file))
+                    .route("/add-peer-address", post(ui::handler::add_peer_address))
                     .route("/pause-session", post(ui::handler::pause_session))
                     .route("/resume-session", post(ui::handler::resume_session))
                     .route("/remove-session", post(ui::handler::remove_session)),
@@ -110,6 +111,7 @@ pub async fn start_server(app: Arc<Application>) {
 pub async fn handler_ping(State(_app): State<Arc<Application>>) -> Json<Pong> {
     Json(Pong::new())
 }
+
 
 #[cfg(test)]
 mod tests {}
