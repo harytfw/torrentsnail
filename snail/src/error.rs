@@ -38,8 +38,6 @@ pub enum Error {
     InvalidTorrent,
     #[error("invalid input: {0}")]
     InvalidInput(String),
-    #[error("bytes to hash id")]
-    BytesToHashId,
     #[error("{0}")]
     Deserialize(String),
     #[error("{0}")]

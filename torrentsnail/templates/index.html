@@ -18,7 +18,7 @@
 				<input name="magnet_link" id="magnet_link" value="" />
 			</div>
 			<div>
-				<button>Confirm</button>
+				<button type="button">Confirm</button>
 			</div>
 		</form>
 	</div>
@@ -32,7 +32,7 @@
 				<input name="peer_address" id="peer_address" value="" />
 			</div>
 			<div>
-				<button>Confirm</button>
+				<button type="button">Confirm</button>
 			</div>
 		</form>
 	</div>
@@ -86,13 +86,13 @@
 				</td>
 				<td>
 					<form action="/ui/action/pause-session?info_hash={{ session.info_hash }}">
-						<button>Pause</button>
+						<button type="button">Pause</button>
 					</form>
 					<form action="/ui/action/resume-session?info_hash={{ session.info_hash }}">
-						<button>Resume</button>
+						<button type="button">Resume</button>
 					</form>
 					<form action="/ui/action/remove-session?info_hash={{ session.info_hash }}">
-						<button>Remove</button>
+						<button type="button">Remove</button>
 					</form>
 				</td>
 			</tr>

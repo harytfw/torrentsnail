@@ -3,8 +3,9 @@ use serde::{de, ser};
 use std::{
     convert,
     fmt::{Debug, Display},
+    hash::Hash,
     ops,
-    sync::Arc, hash::Hash,
+    sync::Arc,
 };
 
 fn valid_byte(ch: u8) -> bool {
@@ -39,16 +40,17 @@ impl HashId {
         matches!(self, Self::V2(_))
     }
 
-    pub fn distance(&self, other: &HashId) -> HashId {
+    pub fn distance(&self, other: &HashId) -> Result<HashId> {
         if self.len() != other.len() {
-            panic!("try to compare v1 with v2");
+            return Err(Error::InvalidInput("try compare v1 and v2".to_string()));
         }
 
         let mut res = *self;
         for i in 0..res.len() {
             res[i] ^= other[i];
         }
-        res
+
+        Ok(res)
     }
 
     pub fn hex(&self) -> String {
@@ -68,7 +70,7 @@ impl HashId {
             let id: [u8; 32] = slice.try_into().unwrap();
             Ok(Self::V2(id))
         } else {
-            Err(Error::BytesToHashId)
+            Err(Error::InvalidInput("invalid length of bytes".to_owned()))
         }
     }
 

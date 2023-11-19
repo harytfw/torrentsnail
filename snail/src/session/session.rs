@@ -75,7 +75,6 @@ impl TorrentSession {
         return Ok(());
     }
 
-    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     async fn do_announce(&mut self) -> Result<()> {
         debug!("announce lsd");
         self.lsd.announce(&self.info_hash).await?;
@@ -86,7 +85,6 @@ impl TorrentSession {
         Ok(())
     }
 
-    #[instrument(skip_all,fields(info_hash=?self.info_hash))]
     async fn tick_announce(mut self) {
         let cancel = self.cancel.clone();
 

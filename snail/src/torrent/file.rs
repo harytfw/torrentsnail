@@ -1,6 +1,6 @@
+use crate::{Error, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
-use crate::{Result, Error};
 
 use serde::{Deserialize, Serialize};
 
@@ -78,7 +78,7 @@ impl TorrentInfo {
         let hash = info_hash
             .as_ref()
             .try_into()
-            .map_err(|_| Error::BytesToHashId)?;
+            .map_err(|_| Error::InvalidInput("invalid hash id".to_string()))?;
         Ok(hash)
     }
 

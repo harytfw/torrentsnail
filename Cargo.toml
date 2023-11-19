@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "bencode",
+  "bencode",
 	"snail",
 	"torrentsnail"
 ]

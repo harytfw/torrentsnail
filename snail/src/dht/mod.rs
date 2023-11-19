@@ -782,15 +782,18 @@ impl DHTInner {
         id
     }
 
+    #[allow(dead_code)]
     fn closest_good_node(&self) -> Option<&Node> {
         let mut good_nodes = vec![];
         for bucket in self.buckets.iter() {
             for node in bucket.nodes().iter() {
                 if node.is_active() {
-                    good_nodes.push((self.my_id.distance(node.id()), node));
+                    let distance = self.my_id.distance(node.id()).unwrap();
+                    good_nodes.push((distance, node));
                 }
             }
         }
+
         good_nodes.sort_by(|a, b| a.0.cmp(&b.0));
         good_nodes.first().map(|(_, node)| *node)
     }
@@ -825,7 +828,7 @@ impl DHTInner {
                 .collect()
         };
 
-        let mut stats = &mut self.stats;
+        let stats = &mut self.stats;
         stats.node_num = bucket_stats.iter().map(|b| b.nodes_num).sum();
         stats.active_num = bucket_stats.iter().map(|b| b.active_num).sum();
         stats.no_reply_num = bucket_stats.iter().map(|b| b.no_reply_num).sum();
