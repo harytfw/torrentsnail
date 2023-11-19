@@ -1,4 +1,5 @@
 use crate::addr::CompactPeerV4;
+use crate::host_port::HostAddr;
 use crate::torrent::HashId;
 use crate::{Error, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -8,7 +9,7 @@ use serde::{ser, Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::io::{Cursor, Read};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub enum Action {
@@ -319,13 +320,18 @@ impl AnnounceRequest {
         self
     }
 
-    pub fn set_ip_address(&mut self, ip_address: &SocketAddr) -> &mut Self {
-        match ip_address {
-            SocketAddr::V4(v4) => {
-                self.ip_address = u32::from_be_bytes(v4.ip().octets());
-                self.port = v4.port();
+    pub fn set_ip_address(&mut self, ip_address: &HostAddr) -> &mut Self {
+        self.port = ip_address.port();
+        match ip_address.ip() {
+            Some(ip) => match ip {
+                IpAddr::V4(v4) => {
+                    self.ip_address = u32::from_ne_bytes(v4.octets());
+                }
+                IpAddr::V6(_) => todo!(),
+            },
+            None => {
+                todo!()
             }
-            SocketAddr::V6(_) => todo!(),
         }
         self
     }

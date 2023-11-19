@@ -1,9 +1,6 @@
 use crate::Result;
 use std::fs;
-use std::{
-    net::SocketAddr,
-    path::{PathBuf},
-};
+use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -56,6 +53,7 @@ impl Default for Config {
 pub struct NetworkConfig {
     pub proxy: Option<ProxyConfig>,
     pub bind_interface: String,
+    pub public_host: String,
     pub torrent_port: u16,
     pub http_port: u16,
     pub tcp_backlog: u32,
@@ -78,6 +76,9 @@ impl NetworkConfig {
             if let Some(val) = table.get("http_port") {
                 self.http_port = val.as_u64().unwrap() as u16;
             }
+            if let Some(val) = table.get("public_host") {
+                self.public_host = val.as_str().unwrap().to_string();
+            }
         }
         Ok(())
     }
@@ -91,6 +92,7 @@ impl Default for NetworkConfig {
             torrent_port: 9010,
             http_port: 9011,
             tcp_backlog: 20,
+            public_host: "127.0.0.1".to_owned(),
         }
     }
 }

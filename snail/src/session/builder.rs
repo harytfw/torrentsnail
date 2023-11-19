@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::dht::DHT;
-use crate::lsd::LSD;
+use crate::host_port::HostAddr;
+use crate::lsd::LocalServiceDiscovery;
 use crate::magnet::MagnetURI;
 use crate::message::{BTHandshake, MSG_UT_METADATA};
 use crate::session::constant::MAIN_TORRENT_PATH;
@@ -9,7 +10,6 @@ use crate::session::TorrentSessionStatus;
 use crate::torrent::TorrentFile;
 use crate::tracker::TrackerClient;
 use crate::{torrent, Error, Result, SNAIL_VERSION};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::AtomicU32;
@@ -32,9 +32,9 @@ pub struct TorrentSessionBuilder {
     torrent_path: Option<PathBuf>,
     torrent: Option<TorrentFile>,
     dht: Option<DHT>,
-    lsd: Option<LSD>,
-    my_id: Option<HashId>,
-    listen_addr: Option<SocketAddr>,
+    lsd: Option<LocalServiceDiscovery>,
+    my_id: Option<Arc<HashId>>,
+    public_addr: Option<Arc<HostAddr>>,
     config: Option<Arc<Config>>,
 }
 
@@ -99,23 +99,23 @@ impl TorrentSessionBuilder {
         }
     }
 
-    pub fn with_lsd(self, lsd: LSD) -> Self {
+    pub fn with_lsd(self, lsd: LocalServiceDiscovery) -> Self {
         Self {
             lsd: Some(lsd),
             ..self
         }
     }
 
-    pub fn with_my_id(self, my_id: HashId) -> Self {
+    pub fn with_my_id(self, my_id: Arc<HashId>) -> Self {
         Self {
             my_id: Some(my_id),
             ..self
         }
     }
 
-    pub fn with_listen_addr(self, listen_addr: SocketAddr) -> Self {
+    pub fn with_public_addr(self, public_addr: Arc<HostAddr>) -> Self {
         Self {
-            listen_addr: Some(listen_addr),
+            public_addr: Some(public_addr),
             ..self
         }
     }
@@ -217,17 +217,15 @@ impl TorrentSessionBuilder {
             data_dir: Arc::new(session_data_dir),
             lsd: self.lsd.unwrap(),
             dht: self.dht.unwrap(),
-            my_id: Arc::new(self.my_id.unwrap()),
-            listen_addr: Arc::new(self.listen_addr.unwrap()),
+            my_id: Arc::clone(&my_id),
+            listen_addr: Arc::clone(self.public_addr.as_ref().unwrap()),
             cfg: self.config.unwrap(),
             event_tx: action_tx,
         };
         {
             let ts_clone = ts.clone();
             tokio::spawn(async move {
-                ts_clone
-                    .start_tick(action_rx)
-                    .await;
+                ts_clone.start_tick(action_rx).await;
             });
         }
         info!(?info_hash, "new torrent session");

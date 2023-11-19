@@ -1,5 +1,6 @@
 use crate::addr::CompactNodesV4;
 use crate::addr::SocketAddrWithId;
+use crate::host_port::HostAddr;
 use crate::torrent::HashId;
 use crate::{Error, Result};
 use bencode::to_bytes;
@@ -958,7 +959,7 @@ impl DHT {
             .unwrap_or_else(Vec::new)
     }
 
-    pub async fn announce(&self, info_hash: &HashId, public_addr: SocketAddr) -> Result<()> {
+    pub async fn announce(&self, info_hash: &HashId, public_addr: &HostAddr) -> Result<()> {
         let inner = self.inner.read().await;
         let sender = inner.sender.clone();
         let info_hash_arc = Arc::new(*info_hash);
@@ -968,6 +969,7 @@ impl DHT {
                     let dest_addr = *node.addr();
                     let sender_clone = sender.clone();
                     let info_hash_arc = Arc::clone(&info_hash_arc);
+                    let public_addr = public_addr.clone();
                     tokio::spawn(async move {
                         let info_hash_arc = info_hash_arc;
                         match sender_clone

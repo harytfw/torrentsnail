@@ -1,12 +1,14 @@
 use anyhow::{Error, Result};
 use snail::config::Config;
+use snail::host_port::HostAddr;
 use snail::message::BTHandshake;
 use snail::session::{TorrentSession, TorrentSessionBuilder};
-use snail::{dht::DHT, lsd::LSD, torrent::HashId};
+use snail::{dht::DHT, lsd::LocalServiceDiscovery, torrent::HashId};
 
 use crate::app::handler::start_server;
 use dashmap::DashMap;
 
+use std::net::IpAddr;
 use std::path::Path;
 use std::{fs, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -19,9 +21,10 @@ use tracing::{debug, debug_span, error, instrument, Instrument};
 #[derive(Clone)]
 pub struct Application {
     pub my_id: Arc<HashId>,
-    pub listen_addr: Arc<SocketAddr>,
+    pub public_addr: Arc<HostAddr>,
+    pub bind_addr: Arc<SocketAddr>,
     dht: DHT,
-    lsd: LSD,
+    lsd: LocalServiceDiscovery,
     sessions: Arc<DashMap<HashId, TorrentSession>>,
     pub(crate) cancel: CancellationToken,
     pub(crate) config: Arc<Config>,
@@ -38,19 +41,20 @@ impl Application {
             fs::create_dir_all(&config.data_dir)?;
         }
 
-        let listen_addr: Arc<SocketAddr> = Arc::new(
-            format!(
-                "{}:{}",
-                config.network.bind_interface, config.network.torrent_port
-            )
-            .parse()?,
+        let bind_addr: Arc<SocketAddr> = Arc::new(SocketAddr::new(
+            config.network.bind_interface.parse::<IpAddr>().unwrap(),
+            config.network.torrent_port,
+        ));
+
+        let public_addr: Arc<HostAddr> = Arc::new(
+            HostAddr::new(&config.network.public_host, config.network.torrent_port).unwrap(),
         );
 
         let my_id = Arc::new(snail::utils::load_id(&config.id_path())?);
         debug!(?my_id, "setup my_id");
 
-        let udp = Arc::new(UdpSocket::bind(listen_addr.as_ref()).await?);
-        debug!(?listen_addr, "listen udp socket");
+        let udp = Arc::new(UdpSocket::bind(*bind_addr).await?);
+        debug!(?public_addr, "listen udp socket");
 
         debug!("setup dht");
         let dht = DHT::new(udp.clone(), &my_id, &config.routing_table_path());
@@ -58,13 +62,7 @@ impl Application {
         dht.load_routing_table().await?;
 
         debug!("setup lsd");
-        let lsd = {
-            LSD::new(
-                Arc::clone(&udp),
-                &config.network.bind_interface,
-                config.network.torrent_port,
-            )
-        };
+        let lsd = { LocalServiceDiscovery::new(Arc::clone(&udp)) };
 
         let app = Arc::new(Self {
             my_id,
@@ -72,14 +70,15 @@ impl Application {
             lsd,
             sessions: Arc::new(DashMap::new()),
             cancel: CancellationToken::new(),
-            listen_addr: Arc::clone(&listen_addr),
+            public_addr: Arc::clone(&public_addr),
+            bind_addr: Arc::clone(&bind_addr),
             config: Arc::clone(&config),
             ui_url_prefix: "/ui".to_string(),
         });
         {
-            debug!(?listen_addr, "setup tcp listener");
+            debug!(?bind_addr, "setup tcp listener");
             let tcp = TcpSocket::new_v4()?;
-            tcp.bind(*listen_addr)?;
+            tcp.bind(*bind_addr)?;
             let listener = tcp.listen(config.network.tcp_backlog)?;
             tokio::spawn(Arc::clone(&app).accept_tcp(listener));
         }
@@ -200,8 +199,8 @@ impl Application {
         snail::session::TorrentSessionBuilder::new()
             .with_lsd(self.lsd.clone())
             .with_dht(self.dht.clone())
-            .with_my_id(*self.my_id)
-            .with_listen_addr(*self.listen_addr)
+            .with_my_id(Arc::clone(&self.my_id))
+            .with_public_addr(Arc::clone(&self.public_addr))
             .with_config(self.config.clone())
     }
 

@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::dht::DHT;
-use crate::lsd::LSD;
+use crate::host_port::HostAddr;
+use crate::lsd::LocalServiceDiscovery;
 use crate::message::BTHandshake;
 use crate::session::manager::PieceActivityManager;
 use crate::session::peer::Peer;
@@ -40,10 +41,10 @@ pub struct TorrentSession {
 
     pub(crate) status: Arc<AtomicU32>,
     pub(crate) cancel: CancellationToken,
-    pub(crate) listen_addr: Arc<SocketAddr>,
+    pub(crate) listen_addr: Arc<HostAddr>,
     pub(crate) tracker: TrackerClient,
     pub(crate) dht: DHT,
-    pub(crate) lsd: LSD,
+    pub(crate) lsd: LocalServiceDiscovery,
     pub(crate) cfg: Arc<Config>,
 
     pub(crate) main_sm: StorageManager,
@@ -77,9 +78,11 @@ impl TorrentSession {
 
     async fn do_announce(&mut self) -> Result<()> {
         debug!("announce lsd");
-        self.lsd.announce(&self.info_hash).await?;
+        self.lsd
+            .announce(&self.info_hash, &self.listen_addr)
+            .await?;
         self.dht
-            .announce(&self.info_hash, *self.listen_addr)
+            .announce(&self.info_hash, &self.listen_addr)
             .await?;
         self.search_peer_and_connect().await?;
         Ok(())
